@@ -33,6 +33,11 @@ type fake struct {
 	slotSz int64
 	slots  int
 
+	// Everything below is written by the TEST goroutine and read by serve, so
+	// all of it lives under mu and is reached through set/hooks/state. A hook
+	// assigned in the clear is a data race the race detector will find, and
+	// finding it in the harness rather than in the package is the harness
+	// working as intended.
 	displays []Display
 	consent  bool
 	cfg      ConfigMessage
@@ -83,6 +88,54 @@ func newFake(t testing.TB) *fake {
 	return f
 }
 
+// Every field a test changes after newFake has started serving is written
+// through one of these, and read by serve under the same lock. A hook assigned
+// in the clear is a data race the detector finds -- and finding it in the
+// harness rather than in the package is the harness working as intended.
+
+func (f *fake) setOnList(fn func(*fake)) {
+	f.mu.Lock()
+	f.onList = fn
+	f.mu.Unlock()
+}
+
+func (f *fake) setOnStart(fn func(*fake, StartMessage)) {
+	f.mu.Lock()
+	f.onStart = fn
+	f.mu.Unlock()
+}
+
+func (f *fake) setOnConsent(fn func(*fake, bool)) {
+	f.mu.Lock()
+	f.onConsent = fn
+	f.mu.Unlock()
+}
+
+func (f *fake) setDisplays(ds []Display) {
+	f.mu.Lock()
+	f.displays = ds
+	f.mu.Unlock()
+}
+
+func (f *fake) setConsent(v bool) {
+	f.mu.Lock()
+	f.consent = v
+	f.mu.Unlock()
+}
+
+func (f *fake) setConfig(c ConfigMessage) {
+	f.mu.Lock()
+	f.cfg = c
+	f.mu.Unlock()
+}
+
+// config returns the announced configuration.
+func (f *fake) config() ConfigMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cfg
+}
+
 func (f *fake) serve() {
 	c, err := f.ln.AcceptUnix()
 	if err != nil {
@@ -123,32 +176,38 @@ func (f *fake) serve() {
 }
 
 func (f *fake) handle(typ uint8, body []byte, fd int) {
+	f.mu.Lock()
+	onList, onStart, onConsent := f.onList, f.onStart, f.onConsent
+	displays := append([]Display(nil), f.displays...)
+	consent, cfg := f.consent, f.cfg
+	f.mu.Unlock()
+
 	switch typ {
 	case MsgListDisplays:
-		if f.onList != nil {
-			f.onList(f)
+		if onList != nil {
+			onList(f)
 			return
 		}
-		f.send(MsgDisplays, EncodeDisplays(f.displays))
+		f.send(MsgDisplays, EncodeDisplays(displays))
 	case MsgConsentRequest:
 		prompt := len(body) > 0 && body[0] != 0
-		if f.onConsent != nil {
-			f.onConsent(f, prompt)
+		if onConsent != nil {
+			onConsent(f, prompt)
 			return
 		}
-		f.send(MsgConsent, EncodeConsent(f.consent))
+		f.send(MsgConsent, EncodeConsent(consent))
 	case MsgStart:
 		s, err := DecodeStart(body)
 		if err != nil {
 			f.t.Errorf("decoding MsgStart: %v", err)
 			return
 		}
-		if f.onStart != nil {
-			f.onStart(f, s)
+		if onStart != nil {
+			onStart(f, s)
 			return
 		}
-		f.send(MsgConfig, EncodeConfig(f.cfg))
-		f.lendBuffer(f.cfg.Slots, f.cfg.SlotSize)
+		f.send(MsgConfig, EncodeConfig(cfg))
+		f.lendBuffer(cfg.Slots, cfg.SlotSize)
 	case MsgStop, MsgBye:
 		select {
 		case f.stopped <- struct{}{}:
@@ -235,14 +294,15 @@ func (f *fake) paint(fill byte) FrameMsg {
 	f.mu.Lock()
 	f.seq++
 	seq := f.seq
+	cfg := f.cfg
 	slot := int((seq - 1) % uint64(f.slots))
 	off := int64(slot) * f.slotSz
-	for i := int64(0); i < int64(f.cfg.Stride)*int64(f.cfg.Height); i++ {
+	for i := int64(0); i < int64(cfg.Stride)*int64(cfg.Height); i++ {
 		f.buf[off+i] = fill
 	}
 	f.mu.Unlock()
-	m := FrameMsg{Seq: seq, Slot: slot, Width: f.cfg.Width, Height: f.cfg.Height,
-		Stride: f.cfg.Stride, AtUnixNano: int64(seq) * 1_000_000}
+	m := FrameMsg{Seq: seq, Slot: slot, Width: cfg.Width, Height: cfg.Height,
+		Stride: cfg.Stride, AtUnixNano: int64(seq) * 1_000_000}
 	f.send(MsgFrame, EncodeFrame(m))
 	return m
 }

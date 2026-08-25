@@ -40,13 +40,6 @@ var (
 	closeFD   = unix.Close
 	dialUnix  = net.DialUnix
 	lookupEnv = os.LookupEnv
-	// readMsg is the one read the transport makes. It is an indirection so the
-	// suite can present the answers a kernel gives only at the edges — an
-	// end-of-stream that arrives as no bytes, no descriptors and no error.
-	readMsg = func(uc *net.UnixConn, b, oob []byte) (int, int, error) {
-		n, oobn, _, _, err := uc.ReadMsgUnix(b, oob)
-		return n, oobn, err
-	}
 )
 
 // fdConn reads a Unix socket while keeping the ancillary descriptors that
@@ -59,6 +52,12 @@ type fdConn struct {
 	rbuf []byte
 	oob  []byte
 	buf  []byte // the unread tail of rbuf
+	// read is the one read the transport makes. It is a FIELD rather than a
+	// package variable so the suite can present the answers a kernel gives only
+	// at the edges — an end-of-stream that arrives as no bytes, no descriptors
+	// and no error — without reaching across every other connection's pump
+	// goroutine to do it, which would be a data race in the harness.
+	read func(b, oob []byte) (int, int, error)
 	// fd is the descriptor received but not yet claimed, or -1.
 	//
 	// ONE, not a queue. A stream socket does not promise that a descriptor is
@@ -72,13 +71,18 @@ type fdConn struct {
 }
 
 func newFDConn(uc *net.UnixConn) *fdConn {
-	return &fdConn{uc: uc, fd: -1,
+	c := &fdConn{uc: uc, fd: -1,
 		rbuf: make([]byte, 8192), oob: make([]byte, unix.CmsgSpace(4)*4)}
+	c.read = func(b, oob []byte) (int, int, error) {
+		n, oobn, _, _, err := uc.ReadMsgUnix(b, oob)
+		return n, oobn, err
+	}
+	return c
 }
 
 func (c *fdConn) Read(p []byte) (int, error) {
 	for len(c.buf) == 0 {
-		n, oobn, err := readMsg(c.uc, c.rbuf, c.oob)
+		n, oobn, err := c.read(c.rbuf, c.oob)
 		if oobn > 0 {
 			c.takeRights(c.oob[:oobn])
 		}

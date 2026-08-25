@@ -180,7 +180,7 @@ func TestDisplaysCrossTheWire(t *testing.T) {
 
 func TestDisplaysReportsAnEmptyList(t *testing.T) {
 	f := newFake(t)
-	f.displays = nil
+	f.setDisplays(nil)
 	if _, err := Displays(ctxT(t)); !errors.Is(err, ErrNoDisplay) {
 		t.Errorf("Displays = %v, want ErrNoDisplay", err)
 	}
@@ -188,7 +188,7 @@ func TestDisplaysReportsAnEmptyList(t *testing.T) {
 
 func TestDisplaysRejectsAMalformedList(t *testing.T) {
 	f := newFake(t)
-	f.onList = func(f *fake) { f.send(MsgDisplays, []byte{0, 0}) }
+	f.setOnList(func(f *fake) { f.send(MsgDisplays, []byte{0, 0}) })
 	if _, err := Displays(ctxT(t)); !errors.Is(err, ErrShortPayload) {
 		t.Errorf("Displays = %v, want ErrShortPayload", err)
 	}
@@ -196,7 +196,7 @@ func TestDisplaysRejectsAMalformedList(t *testing.T) {
 
 func TestDefaultDisplayNeedsOne(t *testing.T) {
 	f := newFake(t)
-	f.displays = []Display{{ID: 7, Name: "Overlay #1", Width: 4, Height: 2}}
+	f.setDisplays([]Display{{ID: 7, Name: "Overlay #1", Width: 4, Height: 2}})
 	if _, err := DefaultDisplay(ctxT(t)); !errors.Is(err, ErrNotFound) {
 		t.Errorf("DefaultDisplay = %v, want ErrNotFound", err)
 	}
@@ -213,7 +213,7 @@ func TestConsent(t *testing.T) {
 	}
 
 	// A refusal is a false, not an error: the user said no, nothing broke.
-	f.consent = false
+	f.setConsent(false)
 	if Authorized() {
 		t.Error("Authorized said yes with no token")
 	}
@@ -223,7 +223,7 @@ func TestConsent(t *testing.T) {
 	}
 
 	// A host that answers a consent request with rubbish.
-	f.onConsent = func(f *fake, _ bool) { f.send(MsgConsent, nil) }
+	f.setOnConsent(func(f *fake, _ bool) { f.send(MsgConsent, nil) })
 	if Authorized() {
 		t.Error("Authorized believed an empty answer")
 	}
@@ -234,10 +234,10 @@ func TestConsent(t *testing.T) {
 
 func TestConsentDenialFromTheHostIsTheSentinel(t *testing.T) {
 	f := newFake(t)
-	f.onConsent = func(f *fake, _ bool) {
+	f.setOnConsent(func(f *fake, _ bool) {
 		f.send(MsgError, EncodeError(ErrorMessage{Code: codeConsentDenied,
 			Op: "getMediaProjection", Detail: "the user declined"}))
-	}
+	})
 	if _, err := RequestAuthorization(ctxT(t)); !errors.Is(err, ErrPermissionDenied) {
 		t.Errorf("RequestAuthorization = %v, want ErrPermissionDenied", err)
 	}
@@ -273,7 +273,7 @@ func TestHostErrorsMapOntoSentinels(t *testing.T) {
 
 func TestHostErrorWithARuinedBodyIsADecodeError(t *testing.T) {
 	f := newFake(t)
-	f.onList = func(f *fake) { f.send(MsgError, []byte{0, 0}) }
+	f.setOnList(func(f *fake) { f.send(MsgError, []byte{0, 0}) })
 	if _, err := Displays(ctxT(t)); !errors.Is(err, ErrShortPayload) {
 		t.Errorf("Displays = %v, want ErrShortPayload", err)
 	}
@@ -281,7 +281,7 @@ func TestHostErrorWithARuinedBodyIsADecodeError(t *testing.T) {
 
 func TestARequestGivesUpWithItsContext(t *testing.T) {
 	f := newFake(t)
-	f.onList = func(*fake) {} // answer nothing at all
+	f.setOnList(func(*fake) {}) // answer nothing at all
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
 	if _, err := Displays(ctx); !errors.Is(err, context.DeadlineExceeded) {
@@ -290,7 +290,7 @@ func TestARequestGivesUpWithItsContext(t *testing.T) {
 	// The abandoned answer must not be handed to the NEXT request.
 	f.send(MsgDisplays, EncodeDisplays([]Display{{ID: 99, Name: "stale"}}))
 	time.Sleep(30 * time.Millisecond)
-	f.onList = nil
+	f.setOnList(nil)
 	ds, err := Displays(ctxT(t))
 	if err != nil {
 		t.Fatalf("Displays: %v", err)
@@ -302,10 +302,10 @@ func TestARequestGivesUpWithItsContext(t *testing.T) {
 
 func TestAStaleReplyOfTheWrongTypeIsIgnored(t *testing.T) {
 	f := newFake(t)
-	f.onList = func(f *fake) {
+	f.setOnList(func(f *fake) {
 		f.send(MsgConsent, EncodeConsent(true)) // an answer to nothing
 		f.send(MsgDisplays, EncodeDisplays(f.displays))
-	}
+	})
 	ds, err := Displays(ctxT(t))
 	if err != nil {
 		t.Fatalf("Displays: %v", err)
@@ -317,7 +317,7 @@ func TestAStaleReplyOfTheWrongTypeIsIgnored(t *testing.T) {
 
 func TestAVanishedHostFailsEveryRequest(t *testing.T) {
 	f := newFake(t)
-	f.onList = func(f *fake) { f.closeConn() }
+	f.setOnList(func(f *fake) { f.closeConn() })
 	if _, err := Displays(ctxT(t)); err == nil {
 		t.Fatal("a request survived the host going away")
 	}
@@ -362,10 +362,10 @@ func TestOnlyOneCaptureAtATime(t *testing.T) {
 
 func TestCaptureSurfacesAHostRefusal(t *testing.T) {
 	f := newFake(t)
-	f.onStart = func(f *fake, _ StartMessage) {
+	f.setOnStart(func(f *fake, _ StartMessage) {
 		f.send(MsgError, EncodeError(ErrorMessage{Code: codeNotCapturable,
 			Op: "createVirtualDisplay", Detail: "no token"}))
-	}
+	})
 	d, _ := DefaultDisplay(ctxT(t))
 	if _, err := CaptureDisplay(ctxT(t), d, Options{}); !errors.Is(err, ErrNotCapturable) {
 		t.Fatalf("CaptureDisplay = %v, want ErrNotCapturable", err)
@@ -374,7 +374,7 @@ func TestCaptureSurfacesAHostRefusal(t *testing.T) {
 
 func TestCaptureRejectsARuinedConfig(t *testing.T) {
 	f := newFake(t)
-	f.onStart = func(f *fake, _ StartMessage) { f.send(MsgConfig, []byte{1, 2, 3}) }
+	f.setOnStart(func(f *fake, _ StartMessage) { f.send(MsgConfig, []byte{1, 2, 3}) })
 	d, _ := DefaultDisplay(ctxT(t))
 	if _, err := CaptureDisplay(ctxT(t), d, Options{}); !errors.Is(err, ErrShortPayload) {
 		t.Fatalf("CaptureDisplay = %v, want ErrShortPayload", err)
@@ -394,7 +394,7 @@ func TestCaptureRejectsAnImpossibleConfig(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFake(t)
-			f.cfg = bad
+			f.setConfig(bad)
 			d, _ := DefaultDisplay(ctxT(t))
 			if _, err := CaptureDisplay(ctxT(t), d, Options{}); err == nil {
 				t.Fatalf("CaptureDisplay accepted %+v", bad)
@@ -430,10 +430,10 @@ func TestCaptureRefusesABufferThatDoesNotMatchTheConfig(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFake(t)
-			f.onStart = func(f *fake, _ StartMessage) {
+			f.setOnStart(func(f *fake, _ StartMessage) {
 				f.send(MsgConfig, EncodeConfig(f.cfg))
 				lend(f)
-			}
+			})
 			d, _ := DefaultDisplay(ctxT(t))
 			if _, err := CaptureDisplay(ctxT(t), d, Options{}); err == nil {
 				t.Fatal("CaptureDisplay accepted a buffer that did not match the config")
@@ -447,7 +447,7 @@ func TestCaptureRefusesABufferThatDoesNotMatchTheConfig(t *testing.T) {
 // then never lends anything must not hang the caller past its context.
 func TestCaptureGivesUpWaitingForTheBuffer(t *testing.T) {
 	f := newFake(t)
-	f.onStart = func(f *fake, _ StartMessage) { f.send(MsgConfig, EncodeConfig(f.cfg)) }
+	f.setOnStart(func(f *fake, _ StartMessage) { f.send(MsgConfig, EncodeConfig(f.cfg)) })
 	d, _ := DefaultDisplay(ctxT(t))
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
@@ -458,10 +458,10 @@ func TestCaptureGivesUpWaitingForTheBuffer(t *testing.T) {
 
 func TestHandingOverTheBufferCanFail(t *testing.T) {
 	f := newFake(t)
-	f.onStart = func(f *fake, _ StartMessage) {
+	f.setOnStart(func(f *fake, _ StartMessage) {
 		f.send(MsgConfig, EncodeConfig(f.cfg))
 		f.closeConn() // the host dies between the config and the buffer
-	}
+	})
 	d, _ := DefaultDisplay(ctxT(t))
 	// Either the send fails or the pump notices first; both are failures, and
 	// neither may leave a stream behind.
@@ -818,11 +818,11 @@ func TestStrayDescriptorsAreNotLeaked(t *testing.T) {
 	}
 	time.Sleep(150 * time.Millisecond)
 	// And a stale buffer arriving in front of the answer a request waits for.
-	f.onList = func(f *fake) {
+	f.setOnList(func(f *fake) {
 		f.sendWithFD(MsgBuffer, EncodeBuffer(3, 160))
 		time.Sleep(10 * time.Millisecond)
 		f.send(MsgDisplays, EncodeDisplays(f.displays))
-	}
+	})
 	for range 20 {
 		if _, err := Displays(ctxT(t)); err != nil {
 			t.Fatalf("Displays: %v", err)
@@ -879,10 +879,8 @@ func TestTakeRightsIgnoresRubbish(t *testing.T) {
 // with no bytes, no descriptors and no error, and treating that as anything
 // else would spin.
 func TestAnEmptyReadIsEndOfStream(t *testing.T) {
-	old := readMsg
-	t.Cleanup(func() { readMsg = old })
-	readMsg = func(*net.UnixConn, []byte, []byte) (int, int, error) { return 0, 0, nil }
 	c := newFDConn(nil)
+	c.read = func([]byte, []byte) (int, int, error) { return 0, 0, nil }
 	if _, err := c.Read(make([]byte, 8)); !errors.Is(err, io.EOF) {
 		t.Errorf("Read of an empty message = %v, want io.EOF", err)
 	}
