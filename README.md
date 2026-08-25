@@ -46,13 +46,29 @@ screen" — it is "can I create extra desktops and put applications on them", th
 way [`go-xrkit/desk`](https://github.com/go-xrkit/desk) does on macOS with real
 virtual displays.
 
-**The answer is no, and it is not close.** An ordinary, unprivileged APK may
-mirror the screen it already has, and may draw its own content on a display that
-is already attached. It may not manufacture desktops.
+**Half of it is no, and the other half is yes** — and the earlier edition of this
+file got the boundary wrong by drawing it in the wrong place. It is not *your own
+app* versus *other people's*, and it is not *virtual display* versus *real one*.
+It is **an activity launch versus a window**, on **a display you made versus a
+display you were given**:
+
+| | a display you were GIVEN (external, overlay) | a display you MADE (`createVirtualDisplay`) |
+|---|---|---|
+| **launch an activity** on it (`setLaunchDisplayId`) | **yes** — ours *and* Settings | **no** — `SecurityException`, even for our own activity |
+| **show a `Presentation`** on it | **yes** | **yes**, and the pixels arrive |
+
+So an ordinary, unprivileged APK **cannot manufacture desktops for other people's
+applications**, which is what a macOS virtual display gives
+[`go-xrkit/desk`](https://github.com/go-xrkit/desk). But it **can manufacture
+several hundred independent displays of its own content**, each rendered by the
+real Android view system and each read back as pixels. That is a great deal more
+than one mirrored phone, and it is what the Android ribbon is actually built on.
 
 Everything below was read off a **live Android 15 (API 35, arm64) system**, not
 off documentation. `host/../docs` carries no prose about this: the transcript
-*is* the documentation.
+*is* the documentation. The probe that produced it is
+[`XrDisplayProbeActivity`](host/java/org/goxrkit/android/XrDisplayProbeActivity.java),
+and it is in the APK: every number below can be re-read by running it.
 
 ### Creating a virtual display and launching something on it
 
@@ -63,6 +79,80 @@ off documentation. `host/../docs` carries no prose about this: the transcript
 | launch **Settings** on it, `ActivityOptions.setLaunchDisplayId(2)` | `SecurityException: Permission Denial: starting Intent { act=android.settings.SETTINGS … } from ProcessRecord{… org.goxrkit.probe/u0a151} … with launchDisplayId=2` |
 | launch **our own activity** on it | *the same denial* — an app may not put even itself on its own virtual display |
 | `… \| VIRTUAL_DISPLAY_FLAG_TRUSTED` (`1 << 10`) | `SecurityException: Requires ADD_TRUSTED_DISPLAY permission to create a trusted virtual display.` |
+
+### But a `Presentation` on that same display works, and the pixels arrive
+
+This is the door the first edition of this file never tried, and it was sitting
+in plain sight: the display it *did* create came back carrying the very flag that
+says a Presentation may be shown there. A `Presentation` is a `Dialog` attached
+to a `Display` — not an activity start — and the check that refused the table
+above is an activity-start check.
+
+```
+Q1 created display 17 "xr-probe-own-0" real=640x480 @320dpi (density 2.0) appBounds=640x480 refresh=60.0Hz flags=0xc state=2 valid=true
+Q1 ANSWER: Presentation.show() SUCCEEDED on the app's OWN virtual display 17
+Q2 frame 640x480 rowStride=2560 pixelStride=4 distinctColours>=64 black=0/307200 meanRGB=85 topLeft=#FF00FF00 topRight=#FFFF0000 bottomLeft=#FFFF0000 bottomRight=#FF0000FF
+Q2 ANSWER: the PIXELS ARRIVED and are the ones the Presentation drew — green top-left, blue bottom-right, red elsewhere, at the exact sampled coordinates
+```
+
+**No exception, no permission, no consent dialog, and no `MediaProjection`.**
+
+The second line is the one that matters, because a `show()` that returns and a
+buffer that arrives are two different facts, and a buffer that arrives *black* is
+the third. So the probe does not look at the picture: it draws solid quadrants of
+exactly known colour and **samples four coordinates**, then reports the black
+count and the distinct-colour count alongside them. `black=0/307200` and four
+sentinels that hold is a frame that carries what was drawn. A run where the
+sentinels did not hold would be reported as a failure, not as a success.
+
+The picture is there anyway, because a person should be able to look:
+`presentation-own-virtual-display.png`, 640×480, the quadrants plus a label drawn
+by Android's own text stack. It is **not committed** — see
+[Where captures go](#where-captures-go).
+
+`Display.getFlags()` answers `0xc` for that display —
+`FLAG_PRESENTATION|FLAG_PRIVATE`. The `0x8 [PRESENTATION]` quoted in the table
+above is `dumpsys`'s view of the underlying *device*, which does not carry the
+private bit. Same display, two objects, and neither is `FLAG_TRUSTED`. **The
+trusted bit gates the activity launch and nothing else here.**
+
+### How many at once: 304, and then the system dies
+
+Not a graceful refusal — that is the finding, and it is the reason a product must
+impose its own limit rather than discovering the platform's.
+
+```
+Q3 1920x1080 #303 id=307 OK — frame 1920x1080 rowStride=7680 pixelStride=4 distinctColours>=64 black=0/2073600 meanRGB=85 topLeft=#FF00FF00 …
+E AndroidRuntime: *** FATAL EXCEPTION IN SYSTEM PROCESS: android.ui
+E AndroidRuntime: android.view.Surface$OutOfResourcesException: NO_MEMORY
+E AndroidRuntime: 	at android.view.SurfaceControl.nativeCreate(Native Method)
+E AndroidRuntime: 	at com.android.server.wm.WindowContainer.createSurfaceControl(WindowContainer.java:678)
+E AndroidRuntime: 	at com.android.server.wm.DisplayAreaPolicyBuilder$PendingArea.instantiateChildren(DisplayAreaPolicyBuilder.java:963)
+E AndroidRuntime: 	at com.android.server.wm.DisplayContent.<init>(DisplayContent.java:1224)
+E AndroidRuntime: 	at com.android.server.wm.RootWindowContainer.onDisplayAdded(RootWindowContainer.java:2769)
+E AndroidRuntime: DeadSystemException: The system died; earlier logs will point to the root cause
+```
+
+`system_server` takes the exception, dies, and the device soft-reboots. An
+ordinary APK with no permissions at all did that.
+
+Two runs, and the number is worth reading carefully:
+
+| displays created | display size | result |
+|---|---|---|
+| 304 | 640×480 | #303 fine; creating #304 killed `system_server` |
+| 304 | 1920×1080 | #303 fine; creating #304 killed `system_server` — **the same count** |
+
+**The same count at nine times the pixels**, with the app's Java heap at 14 MiB
+of 192. So it is not graphics memory: it is `SurfaceControl` handles, and
+`DisplayContent`'s constructor builds a whole `DisplayAreaPolicy` tree of them
+per display. The ceiling therefore does **not** move if you make the screens
+smaller, which is exactly the mitigation somebody would reach for.
+
+64 displays at 1920×1080, each with a Presentation whose pixels arrived correct,
+cost 14 MiB of Java heap and nothing else observable. A ribbon wants a dozen. The
+useful reading is **"as many as you want, with a hard cap you set yourself"** —
+and 304 is a number measured on one emulator, not a constant to hard-code.
 
 `VIRTUAL_DISPLAY_FLAG_TRUSTED` is not merely undocumented — it is **not in the
 public SDK at all**. `javap` on the API 35 `android.jar` lists exactly five
@@ -116,10 +206,17 @@ vdm: createVirtualDevice REFUSED:
 
 ### So what an XR application on Android actually gets
 
-**Mirroring, plus its own content.** One ribbon carrying the phone's real screen
-and whatever the application draws itself — not a ring of independent desktops.
-That is a smaller feature than the macOS one, and pretending otherwise would
-only produce an elaborate structure around something the platform refuses.
+**Mirroring, plus a ring of its own screens.** One panel carrying the phone's
+real screen, and as many independent displays of the application's own content as
+it cares to create — each a real Android display with a real view hierarchy on
+it, each read back as pixels through an `ImageReader`.
+
+What it does **not** get is other people's applications on those screens. That
+half of the refusal is real and is not going anywhere: `ADD_TRUSTED_DISPLAY` is
+`signature`. The ring is ours to fill.
+
+This is the same shape as the answer on Linux, where `xrandr --setmonitor` carves
+virtual monitors out of a real one with no privileged API at all.
 
 ---
 
@@ -218,9 +315,60 @@ On a phone with XR glasses on USB-C DP Alt Mode, Android sees an ordinary second
   are not trusted. So on the **one** display the glasses provide, an ordinary
   app can place other applications. It still cannot make a second one.
 
-The display an app-created virtual display gets is `flags=0x8 [PRESENTATION]`.
-The system-created secondary display is `flags=0x88 [PRESENTATION|TRUSTED]`, and
-the built-in panel is `0x4083`. The trusted bit is the whole difference.
+The display an app-created virtual display gets is `flags=0x8 [PRESENTATION]`
+as a device and `0xc [PRESENTATION|PRIVATE]` as a `Display`. The system-created
+secondary display is `flags=0x88 [PRESENTATION|TRUSTED]`, and the built-in panel
+is `0x4083`. The trusted bit is the whole difference.
+
+### "A screen larger than the phone's" is the glasses' own display
+
+A competing application shows, in the glasses, a screen bigger than the phone's
+panel. There is nothing clever behind it and it is worth saying so rather than
+inferring a mechanism: **it is the external display, used at its own resolution.**
+Nothing virtual is involved.
+
+```
+Q5 display 0  "Built-in Screen" real=1080x1920 @420dpi (density 2.625) appBounds=1080x1920 refresh=60.0Hz flags=0x4083
+Q5 display 16 "Overlay #1"      real=1920x1080 @320dpi (density 2.0)   appBounds=1920x1080 refresh=60.0Hz flags=0x88
+Q5 GIVEN display 16 "Overlay #1": Presentation.show() SUCCEEDED, presentation context 1920x1080 @320dpi
+Q5 GIVEN display 16 after layout, decor 1920x1080
+```
+
+An ordinary app gets **the whole of it**: 1920×1080 at the display's own 320 dpi,
+not the phone's 420, and the decor view really lays out at 1920×1080 — measured
+after layout, not read off the metrics, because a window that reports a size and
+lays out smaller is the thing worth catching. The phone stays 1080×1920 at 420
+dpi and is free to show something else.
+
+One trap, since it produced a wrong number here first: asking
+`getMaximumWindowMetrics()` of a plain `createDisplayContext(d)` answers with the
+**default** display's bounds. It has to be a *window* context —
+`createDisplayContext(d).createWindowContext(TYPE_APPLICATION, null)` — and the
+wrong answer looks entirely plausible.
+
+### The phone as a trackpad
+
+The device's own touchscreen keeps working normally while the content people are
+looking at is somewhere else, and the Presentation does not steal the events:
+
+```
+Q4 READY: presentation up on display 146, phone touches so far 0
+TOUCH phone view ACTION_DOWN (340.00195,930.0) displayId=0
+TOUCH phone view ACTION_UP (340.00195,930.0) displayId=0
+…
+Q4 ANSWER: phone view received 16 MotionEvents while its content was on display 146;
+           the presentation view received 0; last phone event ACTION_UP (620.001,1140.0)
+```
+
+Sixteen `MotionEvent`s to the view on display 0, **zero** to the Presentation's
+view — which is the half that makes a trackpad possible rather than a conflict.
+An app-created virtual display has no input device attached to it at all (its
+`DisplayViewport` is `touch VIRTUAL`), so there is nothing to arbitrate: the
+phone's digitiser belongs to the phone's window, and the pointer drawn into the
+ribbon is ours to place. Nothing new is needed on the Go side —
+[`go-widgets/android`](https://github.com/go-widgets/android) already forwards
+touch as `MsgPointer`; what changes is only where the application chooses to draw
+the cursor.
 
 **What a headset's `Display` reports** — its `Name` is what the catalogue in
 [`go-xrkit/xrkit`](https://github.com/go-xrkit/xrkit)`/glasses` matches models
@@ -332,6 +480,30 @@ returns a subslice.
 
 ---
 
+## Where captures go
+
+A screen capture is a picture of whoever ran the probe, at work, and this
+repository is public. So a capture is **never** written where it could be
+committed, and a `.gitignore` does not count: `git add -f`, a fresh clone, or any
+tool that does not consult it will publish the file anyway.
+
+The probe writes its PNG to the app's external files directory on the **device**,
+which is inside no repository. Pulling it to a workstation is the puller's
+business, and the puller must send it somewhere durable and outside every git
+work tree — `os.UserConfigDir()`-based, with an environment override, and the
+chosen directory **walked up to the filesystem root looking for a `.git`, failing
+if it finds one**. That is `captureDir(t)` in
+[`go-macos/screencapture`](https://github.com/go-macos/screencapture), and the
+refusal is the point:
+
+```console
+$ XRKIT_ARTIFACT_DIR=./testdata/artifacts host/pull-artifacts.sh …
+REFUSED: …/testdata/artifacts is inside the git work tree at …
+```
+
+Nor does it go to a temporary directory. The artefact exists **so that a person
+can look at it**, and `t.TempDir()` would be gone before anyone could.
+
 ## Building the APK
 
 No Gradle and no Kotlin: the host is three Java files and the application is a
@@ -420,11 +592,28 @@ adb pull /storage/emulated/0/Android/data/org.goxrkit.androidhost/files/android-
 
 # 4. the virtual-display refusals, and the secondary-display results
 adb shell settings put global overlay_display_devices "1920x1080/320"
-#   … then the probe under host/, whose transcript is quoted above
 adb shell pm list permissions -f | grep -A4 ADD_TRUSTED_DISPLAY
 javap -classpath "$ANDROID_HOME/platforms/android-35/android.jar" \
       android.hardware.display.DisplayManager | grep VIRTUAL_DISPLAY
+
+# 5. every Q1..Q5 transcript quoted above, from the probe in the APK.
+#    A realistic panel first: a bare avdmanager AVD is 320x640 at 160 dpi.
+adb shell wm size 1080x2400 && adb shell wm density 420
+adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDisplayProbeActivity
+#    … and while it prints "Q4 READY", inject taps on the PHONE's touchscreen:
+adb shell input tap 540 1200
+adb logcat -s xr-probe
+host/pull-artifacts.sh presentation-own-virtual-display.png
+
+# 6. the ceiling. WARNING: this one KILLS system_server and reboots the device.
+adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDisplayProbeActivity \
+    --es smallCap 512 --es bigCap 400
 ```
+
+The probe takes `--es smallCap N` and `--es bigCap N` so the ceiling can be
+hunted without rebuilding, and defaults both to **64** — comfortably below the
+number that kills the device, because a probe whose default reboots the machine
+is a probe nobody runs twice.
 
 ### Hardware connected and exercised
 
@@ -441,6 +630,11 @@ certainly not a phone with glasses on its USB-C port.
 
 ### Partially observed
 
+- **The ceiling of 304, and the crash.** Reproduced twice, at two sizes, on
+  **one** emulator with a software renderer. The *shape* of the failure — no
+  refusal, `system_server` dies of `SurfaceControl` exhaustion, the count does
+  not move with the display size — is the finding and should carry. The
+  **number** is this emulator's and must not be hard-coded anywhere.
 - **A secondary display.** The `Presentation` and `setLaunchDisplayId` results
   come from the emulator's simulated secondary display
   (`settings put global overlay_display_devices "1920x1080/320"`), which reports
@@ -479,9 +673,19 @@ Deliberate, and stated rather than hidden:
   reported as `ErrNotCapturable` rather than attempted. `MediaProjection`
   mirrors the default display; anything else needs `CAPTURE_VIDEO_OUTPUT`,
   which is `signature`;
-- **`Presentation` is not wired into this package.** Drawing on the glasses is
-  the widget back-end's job, not the capture package's; what this repository
-  contributes is the measured fact that the route exists and what it costs;
+- **`Presentation` is not wired into this package.** Drawing on the glasses —
+  and now onto a ring of the application's own displays — is the widget
+  back-end's job, not the capture package's. What this repository contributes is
+  the measured fact that the route exists, that the pixels arrive, and what it
+  costs. The Go transport is untouched by this work and stays at 100%;
+- **the ceiling is not enforced anywhere.** Nothing in this repository stops a
+  caller creating its 304th virtual display and rebooting the phone. Whatever
+  builds the ribbon must impose its own cap, and it should be a small number
+  chosen for memory rather than a large one chosen for the platform's limit;
+- **the trackpad is a finding, not a feature.** That the phone's `MotionEvent`s
+  keep arriving while the content is elsewhere, and that the Presentation gets
+  none of them, is measured. The pointer that a ribbon would draw from them does
+  not exist yet;
 - **the row stride is measured, not guessed — but there is a fallback.** The
   host waits up to two seconds for its first `Image` to learn the allocator's
   real stride. If none arrives (a screen that is off, say) it announces an

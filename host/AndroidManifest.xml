@@ -33,6 +33,14 @@
             </intent-filter>
         </activity>
 
+        <!-- The display probe. Not a launcher activity: it is started by hand
+             with `am start` and reports to logcat. It exists so the answers in
+             the README are the platform's own words rather than a reading of
+             the documentation. -->
+        <activity android:name="org.goxrkit.android.XrDisplayProbeActivity"
+                  android:exported="true"
+                  android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode" />
+
         <activity android:name="org.goxrkit.android.XrConsentActivity"
                   android:exported="false"
                   android:excludeFromRecents="true"
