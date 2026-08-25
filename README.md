@@ -4,7 +4,6 @@
 
 [![ci](https://github.com/go-xrkit/android/actions/workflows/ci.yml/badge.svg)](https://github.com/go-xrkit/android/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/go-xrkit/android.svg)](https://pkg.go.dev/github.com/go-xrkit/android)
-[![Go Report Card](https://goreportcard.com/badge/github.com/go-xrkit/android)](https://goreportcard.com/report/github.com/go-xrkit/android)
 [![coverage 100%](https://img.shields.io/badge/coverage-100%25-brightgreen)](#testing)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 
