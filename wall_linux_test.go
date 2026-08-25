@@ -16,7 +16,7 @@ import (
 )
 
 func wallCtx(t *testing.T) context.Context {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testBudget())
 	t.Cleanup(cancel)
 	return ctx
 }

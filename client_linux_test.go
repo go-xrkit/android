@@ -22,9 +22,27 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// testBudget is how long a helper-provided context lives.
+//
+// Ten seconds is generous natively and is NOT enough under qemu-user: on the
+// riscv64 lane CaptureDisplay ran out of context at 10.01 s, because the wall
+// clock a test waits on is not the clock the emulated code runs on. The
+// emulated CI lanes set XRKIT_TEST_BUDGET, so the allowance lives with the
+// environment that needs it instead of every test being loosened on every
+// architecture -- a budget raised everywhere would stop catching a real hang
+// on the machines where 10 s is the right answer.
+func testBudget() time.Duration {
+	if s := os.Getenv("XRKIT_TEST_BUDGET"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 10 * time.Second
+}
+
 func ctxT(t *testing.T) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testBudget())
 	t.Cleanup(cancel)
 	return ctx
 }
