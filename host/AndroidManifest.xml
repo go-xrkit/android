@@ -47,6 +47,12 @@
                   android:noHistory="true"
                   android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
+        <!-- The wall host: displays this app creates and owns. It asks for NO
+             permission, needs no consent and is not a foreground service —
+             an owned display needs none of what a MediaProjection needs. -->
+        <service android:name="org.goxrkit.android.XrWallService"
+                 android:exported="false" />
+
         <service android:name="org.goxrkit.android.XrHostService"
                  android:exported="false"
                  android:foregroundServiceType="mediaProjection" />

@@ -68,6 +68,12 @@ const (
 	MsgStop uint8 = 0x84
 	// MsgBye tells the host the application is going away.
 	MsgBye uint8 = 0x85
+	// MsgOpenDisplay asks the wall host to create ONE virtual display, show a
+	// Presentation carrying the named content on it, and stream the pixels
+	// Android renders there. The host answers with MsgConfig — whose DisplayID
+	// carries the id the platform assigned — and then MsgBuffer, exactly as
+	// MsgStart does, so one Stream implementation serves both.
+	MsgOpenDisplay uint8 = 0x86
 )
 
 // Reasons a capture stopped, carried by [StoppedMessage].
@@ -476,6 +482,81 @@ func takeString(b []byte) (string, []byte, error) {
 // abstract socket the host listens on when nothing names one explicitly. It
 // matches XrHostService.SOCKET_SUFFIX.
 const SocketSuffix = ".xr"
+
+// WallSocketSuffix is appended to the package name to get the abstract socket
+// the WALL host listens on, matching XrWallService.SOCKET_SUFFIX.
+//
+// It is a second socket, and a second service, because the two have nothing in
+// common but a wire format. Capture needs a MediaProjection, a consent dialog
+// and — from API 34 — a mediaProjection foreground service, none of which an
+// owned display needs: it asks for no permission at all. Keeping them apart
+// means creating a ribbon panel cannot put a "recording your screen" chip in
+// the status bar, and that a capture session ending cannot take a panel with
+// it. The capture host also serves exactly one connection, whereas the wall
+// serves one PER DISPLAY.
+const WallSocketSuffix = ".xrwall"
+
+// EnvWallSocket names the environment variable carrying the wall host's socket,
+// the counterpart of [EnvSocket].
+const EnvWallSocket = "XR_ANDROID_WALL_SOCKET"
+
+// DeriveWallSocket works out which abstract socket the wall host listens on,
+// exactly as [DeriveSocket] does for the capture host.
+func DeriveWallSocket(env string, envOK bool, home string) string {
+	if envOK && env != "" {
+		return env
+	}
+	pkg := packageFromHome(home)
+	if pkg == "" {
+		return ""
+	}
+	return pkg + WallSocketSuffix
+}
+
+// OpenDisplayMessage asks the wall host for one owned display.
+type OpenDisplayMessage struct {
+	// Width and Height are the display's size in pixels.
+	Width, Height int
+	// DensityDPI is the density Android lays the view hierarchy out against.
+	DensityDPI int
+	// Slots is how many frame slots the shared buffer holds.
+	Slots int
+	// ContentKind names the View the host should build; see [Content].
+	ContentKind uint32
+	// ContentPayload is that content's one string argument — a URL for a
+	// WebView, a label for the sentinel.
+	ContentPayload string
+}
+
+// EncodeOpenDisplay encodes an [OpenDisplayMessage].
+func EncodeOpenDisplay(m OpenDisplayMessage) []byte {
+	b := appendInt32(nil, m.Width)
+	b = appendInt32(b, m.Height)
+	b = appendInt32(b, m.DensityDPI)
+	b = appendInt32(b, m.Slots)
+	b = binary.BigEndian.AppendUint32(b, m.ContentKind)
+	return appendString(b, m.ContentPayload)
+}
+
+// DecodeOpenDisplay decodes an [OpenDisplayMessage].
+func DecodeOpenDisplay(b []byte) (OpenDisplayMessage, error) {
+	if len(b) < 20 {
+		return OpenDisplayMessage{}, fmt.Errorf("%w: open-display is %d bytes, want at least 20",
+			ErrShortPayload, len(b))
+	}
+	payload, _, err := takeString(b[20:])
+	if err != nil {
+		return OpenDisplayMessage{}, err
+	}
+	return OpenDisplayMessage{
+		Width:          int32At(b, 0),
+		Height:         int32At(b, 4),
+		DensityDPI:     int32At(b, 8),
+		Slots:          int32At(b, 12),
+		ContentKind:    binary.BigEndian.Uint32(b[16:]),
+		ContentPayload: payload,
+	}, nil
+}
 
 // DeriveSocket works out which abstract socket to dial.
 //

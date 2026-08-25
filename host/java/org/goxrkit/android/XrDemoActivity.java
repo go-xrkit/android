@@ -36,7 +36,19 @@ public final class XrDemoActivity extends Activity {
         tv.setPadding(48, 200, 48, 48);
         setContentView(tv);
 
-        startForegroundService(new Intent(this, XrHostService.class));
+        // The wall host is an ordinary service: no projection, no consent, no
+        // foreground requirement. It is started first and unconditionally,
+        // because nothing can refuse it.
+        startService(new Intent(this, XrWallService.class));
+
+        // The capture host is a mediaProjection foreground service, and the
+        // platform KILLS THE WHOLE PROCESS if it is started without the
+        // project_media app-op -- taking the wall host with it. So an
+        // application that only wants owned displays says so and never touches
+        // it: `am start ... --ez capture false`.
+        if (getIntent().getBooleanExtra("capture", true)) {
+            startForegroundService(new Intent(this, XrHostService.class));
+        }
         try {
             spawn();
         } catch (IOException e) {
