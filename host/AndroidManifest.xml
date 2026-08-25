@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) the go-xrkit/android authors. All rights reserved.
+  SPDX-License-Identifier: BSD-3-Clause
+
+  The XR capture host. Two components and no more: a foreground service that
+  owns the MediaProjection, and a transparent Activity that holds the consent
+  dialog. Neither owns a drawing surface — in a real application that belongs to
+  go-widgets/android's Activity, and there can only be one.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          package="org.goxrkit.androidhost">
+
+    <!-- A mediaProjection foreground service is MANDATORY from API 34: the
+         platform refuses the projection token to a process that is not already
+         running one. FOREGROUND_SERVICE_MEDIA_PROJECTION is protectionLevel
+         normal, so an ordinary APK may simply declare it. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- The service must show a notification, and from API 33 that is a
+         runtime permission. A refusal does not stop the capture. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- GW_PERMISSIONS -->
+
+    <application android:label="go-xrkit" android:hasCode="true">
+        <activity android:name="org.goxrkit.android.XrDemoActivity"
+                  android:exported="true"
+                  android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode">
+            <meta-data android:name="org.goxrkit.args" android:value="" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity android:name="org.goxrkit.android.XrConsentActivity"
+                  android:exported="false"
+                  android:excludeFromRecents="true"
+                  android:noHistory="true"
+                  android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <service android:name="org.goxrkit.android.XrHostService"
+                 android:exported="false"
+                 android:foregroundServiceType="mediaProjection" />
+    </application>
+</manifest>
