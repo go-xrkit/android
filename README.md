@@ -220,6 +220,168 @@ virtual monitors out of a real one with no privileged API at all.
 
 ---
 
+## The Go API for owned displays
+
+The probe proved the platform allows it; this is how a consumer uses it. A
+`Wall` is a set of displays this application created, and the limit on how many
+may exist at once.
+
+```go
+w, err := android.NewWall(0)          // 0 = DefaultMaxDisplays (8)
+defer w.Close()
+
+d, err := w.Open(ctx, android.DisplaySpec{
+        Width: 1280, Height: 720,
+        Content: android.Web{URL: "https://example.org/"},
+})
+if errors.Is(err, android.ErrTooManyDisplays) { ... }
+defer d.Close()
+
+for {
+        f, fresh := d.Frame()          // BORROWED pixels, stride carried
+        if fresh {
+                composite(f.Pix, f.Width, f.Height, f.Stride)
+        }
+}
+```
+
+`OwnedDisplay` **embeds `*Stream`**, so a ribbon consumes a display it made
+exactly as it consumes the mirrored phone — `Frame`, `WaitFrame`, `Stats`,
+`Format`, `Size`, an idempotent `Close`. That is the point: the ribbon does not
+have to know which kind of panel it is holding.
+
+| | |
+|---|---|
+| `NewWall(max int) (*Wall, error)` | `0` means `DefaultMaxDisplays`; past `MaxDisplays`, or negative, is `ErrTooManyDisplays` and no wall |
+| `(*Wall).Open(ctx, DisplaySpec) (*OwnedDisplay, error)` | one display, one Presentation, one feed |
+| `(*Wall).Len() int`, `(*Wall).Max() int` | how full, and how full it may get |
+| `(*Wall).Close() error` | releases every display it still holds; idempotent |
+| `(*OwnedDisplay).ID() int` | the `android.view.Display` id, for logs and `dumpsys` |
+| `(*OwnedDisplay).Spec() DisplaySpec` | the spec, with its zero fields filled in |
+| `(*OwnedDisplay).Close() error` | releases the display and gives the slot back; idempotent |
+| `SentinelColorAt(w, h, x, y) (uint32, bool)` | the colour a correct sentinel frame holds there, or `false` where anti-aliasing makes it unsafe to assert |
+
+### The drawing seam: a DECLARATION, not pixels
+
+`DisplaySpec.Content` names what Android should render. The obvious alternative
+— hand the host a framebuffer to blit — was rejected, and the reason is worth
+stating because it looks like the natural design:
+
+**it would be a round trip with no product.** Pixels this process drew, sent to
+Android, read back unchanged. An application that is drawing should composite in
+Go and skip the display entirely.
+
+The reason to route a ribbon panel through a real Android display is the
+opposite one: to get at what Android renders and a CGO-free Go process
+**cannot** — a `WebView`, a `MediaCodec` surface, a `PdfRenderer`, a maps view.
+None is reachable without JNI, all are ordinary `View`s, and a `Presentation` is
+how a `View` gets onto a display. So `Content` names it, the Java host builds it,
+and the pixels come back through the same borrowed-frame path as a capture. It
+also keeps the rule the rest of this package is built on: *a URL is a decision
+the application made; a WebView is the host obeying it.*
+
+Two implementations, and the set is closed — a `Content` written outside this
+package would name a Java class the host does not have:
+
+- **`Web{URL}`** — a `WebView`. `http`, `https` and `data:` URLs; JavaScript on,
+  file access off. A network URL needs `android.permission.INTERNET`
+  (`protectionLevel` normal); a `data:` URL needs nothing.
+- **`Sentinel{Label}`** — flat quadrants of exactly known colour. It is the
+  package's self-test content and it is exported because a consumer needs it
+  too: a feed that "works" and delivers a black buffer is the silent failure of
+  this whole mechanism, and the only way to catch it is to draw something whose
+  pixels are known in advance and then **sample** them.
+
+### The limit is the safety, and it refuses in both directions
+
+`Wall` refuses past its limit with `ErrTooManyDisplays` **before asking the
+host**, so a full wall costs no round trip and creates nothing. `XrWallService`
+enforces `MAX_DISPLAYS = 32` independently, because a process that does not use
+this API must not be able to get past it either.
+
+| | |
+|---|---|
+| `DefaultMaxDisplays` | **8** — a ribbon uses six to eight |
+| `MaxDisplays` | **32** — the most `NewWall` accepts however explicitly it is asked |
+| measured on one emulator | **304**, at which `system_server` died and the device rebooted |
+
+**Read this before raising the limit.** The ceiling was the *same count* at
+640×480 and at 1920×1080 — nine times the pixels, same number, app heap at 14 MiB
+of 192. It is `SurfaceControl` handles, not graphics memory, and
+**making the screens smaller does not help**, which is exactly the mitigation
+somebody reaches for. 304 is one emulator's measurement, is deliberately not a
+constant anywhere in the code, and a real device's number is unknown and could
+be lower.
+
+Proved on the device, in both directions:
+
+```
+LIMIT 2 of 2 opened, as they must
+LIMIT refused past 2, as it must: android: too many virtual displays: this wall holds 2 of at most 2; close one before opening another
+LIMIT NewWall refuses past the ceiling of 32, as it must
+```
+
+### One connection per display
+
+The capture host memoises a single process-wide session, because there is one
+screen and one projection. A wall is the opposite: several displays live at
+once, each with its own shared buffer and its own frame stream. Multiplexing
+them down one socket would mean a feed id on every frame message and routing on
+the hot path, where a bug mixes two panels' pixels.
+
+A connection each costs one socket per panel — nothing, for the six to eight a
+ribbon uses — and buys three things: `Stream` is reused **unchanged**, including
+its tested frame plumbing; a display's lifetime is exactly a socket's lifetime,
+so closing one cannot disturb another; and a client that dies has its displays
+released by the kernel closing its sockets.
+
+`XrWallService` is therefore a **second service** on its own socket
+(`<package>.xrwall`). It needs no `MediaProjection`, no consent dialog and no
+foreground service — **an owned display asks for no permission at all** — so
+opening a ribbon panel cannot put a "recording your screen" chip in the status
+bar, and a capture session ending cannot take a panel with it.
+
+A `Presentation` shown from a **Service** context works, which was not obvious
+and was measured rather than assumed: `Presentation` is a `Dialog`, and a Dialog
+from a non-Activity context normally fails with `BadTokenException`. It does not
+here, on a private display the app owns.
+
+### What the live proof reports
+
+`cmd/xrwall`, packaged into the APK and run on the device:
+
+```
+WALL available=true
+WALL package default 8, ceiling 32
+OPEN owned display 7 640x480 @320dpi sentinel 0
+FRAME panel 0 640x480 stride 2560 seq 1: sampled 115921, wrong 0, black 0/307200
+OPEN owned display 8 640x480 @320dpi sentinel 1
+FRAME panel 1 640x480 stride 2560 seq 1: sampled 115921, wrong 0, black 0/307200
+OPEN owned display 9 640x480 @320dpi sentinel 2
+FRAME panel 2 640x480 stride 2560 seq 1: sampled 115921, wrong 0, black 0/307200
+WALL holds 3 of 8
+OPEN owned display 10 640x480 @320dpi web data:text/html,<body style='margin:0;background:%23FFFF00'>...
+FRAME web panel 640x480 seq 2: 98.5% of the pixels are the page's own colour
+RESULT every panel carried the pixels its content drew, and the limit refused in both directions
+```
+
+**115 921 pixels asserted per panel, none wrong, none black** — sampled at the
+coordinates `SentinelColorAt` vouches for, never by looking at the picture. The
+web panel is asserted the same way, on the page's own background colour rather
+than on the absence of an error. The artefact is `wall-sentinel.png`; it is
+**not committed** — see [Where captures go](#where-captures-go).
+
+```sh
+APP=./cmd/xrwall host/build.sh && adb install -r host/out/xrhost.apk
+# `--ez capture false` skips the mediaProjection foreground service, which the
+# platform KILLS THE PROCESS for starting without the project_media app-op.
+adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity --ez capture false
+adb logcat -s xrcapture xr-wall
+host/pull-artifacts.sh wall-sentinel.png
+```
+
+---
+
 ## What a capture delivers
 
 Measured, on the emulator named at the bottom of this file, with the
@@ -673,15 +835,17 @@ Deliberate, and stated rather than hidden:
   reported as `ErrNotCapturable` rather than attempted. `MediaProjection`
   mirrors the default display; anything else needs `CAPTURE_VIDEO_OUTPUT`,
   which is `signature`;
-- **`Presentation` is not wired into this package.** Drawing on the glasses —
-  and now onto a ring of the application's own displays — is the widget
-  back-end's job, not the capture package's. What this repository contributes is
-  the measured fact that the route exists, that the pixels arrive, and what it
-  costs. The Go transport is untouched by this work and stays at 100%;
-- **the ceiling is not enforced anywhere.** Nothing in this repository stops a
-  caller creating its 304th virtual display and rebooting the phone. Whatever
-  builds the ribbon must impose its own cap, and it should be a small number
-  chosen for memory rather than a large one chosen for the platform's limit;
+- **`Presentation` on a display the glasses provide is still not wired in.**
+  [`Wall`](#the-go-api-for-owned-displays) covers displays the application
+  MAKES. Drawing on a display it was GIVEN — the one the glasses are — is the
+  widget back-end's job, and what this repository contributes there is only the
+  measured fact that the route exists;
+- **only two `Content` kinds exist.** `Web` and `Sentinel`. `MediaCodec`,
+  `PdfRenderer` and a maps view are the obvious next ones and none is written;
+- **the limit is 32 by construction, not by measurement on hardware.** It is
+  enforced in both the Go API and the Java host, and it is far below the 304
+  that killed `system_server` on an emulator. What a real phone does at 32 owned
+  displays has not been measured, and neither has what it does at 304;
 - **the trackpad is a finding, not a feature.** That the phone's `MotionEvent`s
   keep arriving while the content is elsewhere, and that the Presentation gets
   none of them, is measured. The pointer that a ribbon would draw from them does

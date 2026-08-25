@@ -383,6 +383,8 @@ func hostError(e ErrorMessage) error {
 		return fmt.Errorf("%w: %s", ErrNotFound, e.Detail)
 	case e.Code == codeNotCapturable:
 		return fmt.Errorf("%w: %s", ErrNotCapturable, e.Detail)
+	case e.Code == codeTooManyDisplays:
+		return fmt.Errorf("%w: %s", ErrTooManyDisplays, e.Detail)
 	}
 	return e
 }
@@ -390,10 +392,11 @@ func hostError(e ErrorMessage) error {
 // Codes the host uses for the failures that have a sentinel here. They are part
 // of the wire contract and are mirrored in XrHostService.java.
 const (
-	codeConsentDenied = 1
-	codeNoDisplay     = 2
-	codeNotFound      = 3
-	codeNotCapturable = 4
+	codeConsentDenied   = 1
+	codeNoDisplay       = 2
+	codeNotFound        = 3
+	codeNotCapturable   = 4
+	codeTooManyDisplays = 5
 )
 
 // Displays returns every display the host can see.
