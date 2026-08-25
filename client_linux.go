@@ -8,9 +8,10 @@ package android
 
 // The transport. Android IS Linux, and everything this file needs from the
 // operating system is an ordinary Linux facility — an abstract Unix socket, a
-// memfd and an mmap — which is why the build tag is linux rather than android:
-// the same code runs against a fake host on a CI runner and on a developer's
-// machine, so the suite exercises the REAL back-end rather than a stand-in.
+// descriptor arriving over SCM_RIGHTS and an mmap — which is why the build tag
+// is linux rather than android: the same code runs against a fake host on a CI
+// runner and on a developer's machine, so the suite exercises the REAL
+// back-end rather than a stand-in.
 
 import (
 	"context"
@@ -27,9 +28,12 @@ import (
 )
 
 // EnvSocket names the environment variable carrying the abstract socket the XR
-// host listens on. The host sets it on the process it spawns; when a
-// go-widgets/android host spawns the application instead, the XR host publishes
-// the same name and the application picks it up from the same variable.
+// host listens on. A host that spawns this process sets it.
+//
+// It is not the only route, and in the composition this package is really for
+// it is not the route taken: the process is spawned by go-widgets/android's
+// Activity, which owns the drawing surface, knows nothing about capture and
+// sets no such variable. [DeriveSocket] covers that case from HOME.
 const EnvSocket = "XR_ANDROID_SOCKET"
 
 // Indirections the tests replace to reach the failure branches a real kernel
