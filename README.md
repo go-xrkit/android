@@ -143,7 +143,7 @@ RESULT stats {Frames:493 Superseded:1 Interval:16.755125ms}
 | **size** | the display's native pixels, 1080×2400 here — no downscale is imposed |
 | **format** | `RGBA_8888` (`android.graphics.PixelFormat` 1), packed, 4 bytes per pixel |
 | **stride** | 4320 bytes, which happens to be exactly `width*4` on this device. The API carries the number anyway, because a graphics allocator is free to pad and a sheared image is the classic result of assuming it does not |
-| **rate** | 41 fps sustained at 1080×2400 on a **software-rendered emulator**, with the capturing app in the background. A second run measured 48 fps |
+| **rate** | 41.0 fps sustained at 1080×2400 on a **software-rendered emulator**, with the capturing app in the background. A second run of the same binary, against a slower-changing screen, measured 18.5 fps — the ceiling is a ceiling, and what the screen does sets the rest. A Java-only probe of the same `ImageReader` path, with no Go in it, measured 48.0 fps, which bounds this package's own overhead at a few frames a second |
 | **`Frame()`** | **22.8 ns and 0.000 allocations** per call, over 200 000 calls on the device. That is the borrow: `Frame.Pix` aliases the shared mapping the host wrote into |
 
 ### The content really changes
@@ -163,10 +163,11 @@ recording your screen" chip.
 ### Frames only arrive when something changes
 
 Like ScreenCaptureKit on macOS, a `MediaProjection` is change-driven and
-`Options.FPS` is a **ceiling, not a rate**. On a motionless screen the same
-probe took **39 frames in 4.0 seconds and then nothing at all**. That is the
-platform saying nothing moved; the second return value of `Frame` is the truth
-about it, not a timer.
+`Options.FPS` is a **ceiling, not a rate**. Left in front of a static screen,
+the same `cmd/xrcapture` binary took **35 frames in the first 0.6 seconds and
+then nothing at all for the remaining eleven** — `RESULT frames=35 over 0.63s`.
+That is the platform saying nothing moved; the second return value of `Frame` is
+the truth about it, not a timer.
 
 ### Going to the background does not stop it
 
