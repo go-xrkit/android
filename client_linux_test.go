@@ -431,7 +431,7 @@ func TestCaptureRefusesABufferThatDoesNotMatchTheConfig(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFake(t)
 			f.setOnStart(func(f *fake, _ StartMessage) {
-				f.send(MsgConfig, EncodeConfig(f.cfg))
+				f.send(MsgConfig, EncodeConfig(f.config()))
 				lend(f)
 			})
 			d, _ := DefaultDisplay(ctxT(t))
@@ -447,7 +447,7 @@ func TestCaptureRefusesABufferThatDoesNotMatchTheConfig(t *testing.T) {
 // then never lends anything must not hang the caller past its context.
 func TestCaptureGivesUpWaitingForTheBuffer(t *testing.T) {
 	f := newFake(t)
-	f.setOnStart(func(f *fake, _ StartMessage) { f.send(MsgConfig, EncodeConfig(f.cfg)) })
+	f.setOnStart(func(f *fake, _ StartMessage) { f.send(MsgConfig, EncodeConfig(f.config())) })
 	d, _ := DefaultDisplay(ctxT(t))
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
@@ -459,7 +459,7 @@ func TestCaptureGivesUpWaitingForTheBuffer(t *testing.T) {
 func TestHandingOverTheBufferCanFail(t *testing.T) {
 	f := newFake(t)
 	f.setOnStart(func(f *fake, _ StartMessage) {
-		f.send(MsgConfig, EncodeConfig(f.cfg))
+		f.send(MsgConfig, EncodeConfig(f.config()))
 		f.closeConn() // the host dies between the config and the buffer
 	})
 	d, _ := DefaultDisplay(ctxT(t))
