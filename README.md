@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/go-xrkit/brand/main/social/go-xrkit.png" alt="go-xrkit" width="720"></p>
+
 # go-xrkit/android
 
 [![ci](https://github.com/go-xrkit/android/actions/workflows/ci.yml/badge.svg)](https://github.com/go-xrkit/android/actions/workflows/ci.yml)
