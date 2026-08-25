@@ -214,5 +214,11 @@ jobs:
         with:
           go-version: stable
       - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      # An emulated architecture runs roughly an order of magnitude slower than
+      # the host, so the helper contexts get a budget that matches the machine
+      # they are actually running on. Raising the default instead would stop
+      # the suite catching a real hang everywhere else.
       - name: Test under qemu (${{ matrix.goarch }})
         run: CGO_ENABLED=0 GOARCH=${{ matrix.goarch }} go test -exec=${{ matrix.qemu }} ./...
+        env:
+          XRKIT_TEST_BUDGET: 120s
