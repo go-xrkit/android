@@ -391,6 +391,41 @@ very thing an Android application binary must not have.
 
 This section distinguishes three things and never rounds upward.
 
+### Reproducing all of it
+
+```sh
+# 1. an arm64 Android 15 emulator (Apple Silicon or an arm64 Linux host)
+sdkmanager --install "platforms;android-35" "build-tools;35.0.0" \
+           "system-images;android-35;default;arm64-v8a" "emulator"
+avdmanager create avd -n xr35 -k "system-images;android-35;default;arm64-v8a"
+emulator -avd xr35 -no-window -no-audio -gpu swiftshader_indirect &
+adb wait-for-device
+
+# 2. the unit suite, on the device
+CGO_ENABLED=0 GOOS=android GOARCH=arm64 go test -c -cover -coverpkg=. -o xr.test .
+adb push xr.test /data/local/tmp/
+adb shell 'cd /data/local/tmp && chmod +x xr.test && TMPDIR=/data/local/tmp ./xr.test'
+
+# 3. the end-to-end capture, through a real APK
+host/build.sh && adb install -r host/out/xrhost.apk
+adb shell pm grant org.goxrkit.androidhost android.permission.POST_NOTIFICATIONS
+adb shell appops set org.goxrkit.androidhost PROJECT_MEDIA allow   # skips the
+                       # consent dialog; an adb-only shortcut, never an app one
+adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity
+sleep 3 && adb shell am start -a android.settings.SETTINGS    # something moving
+for i in $(seq 1 26); do adb shell input swipe 540 1600 540 900 300; \
+                         adb shell input swipe 540 900 540 1600 300; done
+adb logcat -s xrcapture xr-host
+adb pull /storage/emulated/0/Android/data/org.goxrkit.androidhost/files/android-capture.png
+
+# 4. the virtual-display refusals, and the secondary-display results
+adb shell settings put global overlay_display_devices "1920x1080/320"
+#   … then the probe under host/, whose transcript is quoted above
+adb shell pm list permissions -f | grep -A4 ADD_TRUSTED_DISPLAY
+javap -classpath "$ANDROID_HOME/platforms/android-35/android.jar" \
+      android.hardware.display.DisplayManager | grep VIRTUAL_DISPLAY
+```
+
 ### Hardware connected and exercised
 
 **None.** No XR glasses were attached to an Android device for any of this. That
@@ -398,8 +433,10 @@ is the honest headline and it should be read before anything else here.
 
 Everything above was measured on the **Android emulator**, API level 35
 (Android 15), `system-images/android-35/default/arm64-v8a`, running on an Apple
-Silicon Mac — a real arm64 Android system, a real MediaProjection, a real
-`SharedMemory`, a real socket, real frames. It is not a real phone, and it is
+Silicon Mac — fingerprint
+`Android/sdk_phone64_arm64/emu64a:15/AE3A.240806.019/12368160:userdebug/test-keys`,
+1080×2400 at 420 dpi. A real arm64 Android system, a real MediaProjection, a
+real `SharedMemory`, a real socket, real frames. It is not a real phone, and it is
 certainly not a phone with glasses on its USB-C port.
 
 ### Partially observed
