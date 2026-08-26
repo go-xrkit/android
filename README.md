@@ -2,10 +2,10 @@
 
 # go-xrkit/android
 
-[![ci](https://github.com/go-xrkit/android/actions/workflows/ci.yml/badge.svg)](https://github.com/go-xrkit/android/actions/workflows/ci.yml)
+[![CI](https://github.com/go-xrkit/android/actions/workflows/ci.yml/badge.svg)](https://github.com/go-xrkit/android/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/go-xrkit/android.svg)](https://pkg.go.dev/github.com/go-xrkit/android)
-[![coverage 100%](https://img.shields.io/badge/coverage-100%25-brightgreen)](#testing)
-[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
+[![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/go-xrkit/android/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-BSD--3--Clause-blue)](LICENSE)
 
 Screen capture on Android from **pure Go**, `CGO_ENABLED=0`, for an XR
 compositor that redraws every frame.
