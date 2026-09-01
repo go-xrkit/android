@@ -119,7 +119,7 @@ jobs:
           # list, even where these names are always plain version numbers.
           bt=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort -V | tail -1)
           "$ANDROID_HOME/build-tools/$bt/apksigner" verify --verbose host/out/xrhost.apk
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: xrhost-apk
           path: host/out/xrhost.apk
