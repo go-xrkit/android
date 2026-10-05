@@ -117,6 +117,43 @@ above is `dumpsys`'s view of the underlying *device*, which does not carry the
 private bit. Same display, two objects, and neither is `FLAG_TRUSTED`. **The
 trusted bit gates the activity launch and nothing else here.**
 
+### How WIDE: 32768 pixels, and the pixels arrive
+
+The width is the whole point. [`go-xrkit/desk`](https://github.com/go-xrkit/desk)
+puts a 6400-pixel spreadsheet in front of somebody on macOS; the Android ribbon
+can only do the same if an owned display can BE that wide.
+[`MaxDimension`](screencapture.go) says 32768, but that is this package's own
+guard — not a measurement of any particular phone, and a width that is accepted
+and then hands back a black buffer is the silent failure worth fearing.
+
+Measured by [`cmd/xrwide`](cmd/xrwide) on a **Pixel 11 Pro Fold, Android 17
+(API 37, arm64)**, one display per width, each wall closed before the next:
+
+| width | pixels sampled | wrong | black |
+|---|---:|---:|---:|
+| 1920 x 1080 | 779 581 | **0** | 0 / 2 073 600 |
+| 3840 x 1080 | 1 558 621 | **0** | 0 / 4 147 200 |
+| **6400 x 1080** | 2 597 341 | **0** | 0 / 6 912 000 |
+| 8640 x 1080 | 3 506 221 | **0** | 0 / 9 331 200 |
+| 16384 x 1080 | 6 648 349 | **0** | 0 / 17 694 720 |
+| **32768 x 1080** | **13 296 157** | **0** | **0 / 35 389 440** |
+
+Every width opened and every width carried its content: `RESULT widest display
+that carried its pixels: 32768`. Thirty-five million pixels at the widest, all
+correct, and the whole sweep takes about 700 ms.
+
+⚠ **The sweep distinguishes three answers, and the distinction is the point.**
+A width can be *refused* — a limit to respect. It can be *accepted and blank* —
+a limit that LIES, and the one a naive check reports as a success. Or it can
+arrive with its pixels, sampled at the coordinates
+[`SentinelColorAt`](sentinel.go) vouches for, which is the same yardstick
+`cmd/xrwall` uses so the two commands cannot disagree about what a correct panel
+looks like.
+
+⚠ **One wall per width, closed immediately.** A 32768 x 1080 surface is 135 MB
+of BGRA on its own; measuring where the edge is must not be what pushes the
+process over it.
+
 ### How many at once: 304, and then the system dies
 
 Not a graceful refusal — that is the finding, and it is the reason a product must
