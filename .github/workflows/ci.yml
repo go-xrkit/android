@@ -98,6 +98,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.1'
+      - run: go version
       - run: CGO_ENABLED=0 go vet ./...
       - run: CGO_ENABLED=0 go build ./...
       - name: Test and gate coverage
@@ -131,6 +132,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.1'
+      - run: go version
       - run: go vet ./...
       - run: go build ./...
       - run: go test ./...
@@ -144,6 +146,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.1'
+      - run: go version
       - name: Build the APK
         run: ANDROID_HOME=${ANDROID_HOME:-$ANDROID_SDK_ROOT} host/build.sh
       - name: Verify the signature
@@ -183,6 +186,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.1'
+      - run: go version
       - name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
         run: CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build ./...
       - name: Vet (${{ matrix.goos }}/${{ matrix.goarch }})
@@ -200,6 +204,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.1'
+      - run: go version
       - name: arm64 links CGO-free
         run: CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -o /dev/null ./cmd/xrcapture
       - name: arm, amd64 and 386 still require cgo
@@ -228,6 +233,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.1'
+      - run: go version
       - run: go env GOARCH && CGO_ENABLED=0 go test ./...
 
   arch-qemu:
@@ -246,6 +252,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.1'
+      - run: go version
       - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
       # An emulated architecture runs roughly an order of magnitude slower than
       # the host, so the helper contexts get a budget that matches the machine
