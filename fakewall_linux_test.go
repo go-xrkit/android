@@ -28,6 +28,12 @@ type fakeWall struct {
 	name string
 	ln   *net.UnixListener
 
+	// serving counts the goroutines that may still touch t. A test that returned
+	// while one of them was inside lendBuffer had it call t.Logf on a FINISHED
+	// subtest, which the race detector reports as a race in the fake rather than
+	// in the code under test -- a red build that says nothing about the package.
+	serving sync.WaitGroup
+
 	mu     sync.Mutex
 	panels []*fakePanel
 	nextID int
@@ -74,6 +80,13 @@ func newFakeWall(t testing.TB, max int) *fakeWall {
 		for _, p := range panels {
 			p.release()
 		}
+		// ⛔ AND WAIT FOR THEM. Closing the sockets ends each serve loop, but
+		// not instantly: one caught mid-lendBuffer went on to call t.Logf
+		// after the subtest had returned, and the race detector reported it as
+		// a race -- a red build about the fake, saying nothing about the
+		// package. Cleanup still holds a live t, so waiting here is both
+		// correct and the only place it can be done.
+		w.serving.Wait()
 	})
 	t.Setenv(EnvWallSocket, name)
 	return w
@@ -105,7 +118,11 @@ func (w *fakeWall) accept() {
 		w.mu.Lock()
 		w.panels = append(w.panels, p)
 		w.mu.Unlock()
-		go p.serve()
+		w.serving.Add(1)
+		go func() {
+			defer w.serving.Done()
+			p.serve()
+		}()
 	}
 }
 
