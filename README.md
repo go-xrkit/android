@@ -883,6 +883,75 @@ REFUSED: …/testdata/artifacts is inside the git work tree at …
 Nor does it go to a temporary directory. The artefact exists **so that a person
 can look at it**, and `t.TempDir()` would be gone before anyone could.
 
+## ⛔ Android 17 will not let your workstation reach the phone
+
+Every command here is run over a cable, and the phone has **one** USB-C port that
+the glasses want all of. The obvious escape is `adb` over Wi-Fi — and on Android
+17 it does not work, for a reason that is not a misconfiguration and that costs
+an evening to find. This is what was measured, so the next person does not have
+to.
+
+### The measurement
+
+Pixel 11 Pro Fold, Android 17, phone and workstation on the same Wi-Fi, taken
+seconds apart after a fresh reboot:
+
+```
+phone  → Mac    2/2 received, 9–57 ms
+Mac    → phone  0/3                       ← silently dropped, not refused
+```
+
+And read out of the device itself:
+
+```
+$ adb shell device_config get android_core_networking \
+      android.permission.flags.access_local_network_permission_enabled
+true
+```
+
+[Local Network Protection](https://developer.android.com/privacy-and-security/local-network-permission)
+is **mandatory from Android 17**: traffic to and from a local network address
+needs `ACCESS_LOCAL_NETWORK`, *including accepting incoming TCP connections*. The
+phone reaches out fine and nothing reaches in — which is exactly `adb connect`,
+`adb pair`, and a laptop trying to poke at anything the phone is serving.
+
+### What was ruled out, because the symptom has several plausible causes
+
+| suspected | ruled out by |
+|---|---|
+| the access point isolating its clients | **two different access points** — a macOS Internet Sharing hotspot and a Freebox Ultra on 6 GHz — gave the identical asymmetry. Vary the AP, nothing changes: the phone is the constant |
+| a VPN on the phone | `dumpsys connectivity` reports `NOT_VPN`, and the phone has only `lo` and `wlan0` |
+| a firewall app | no third-party package matching one is installed |
+| a closed port | every port behaves alike, open or not — and a genuinely reachable host with a closed port takes a **1-second timeout**, which the router does and the phone does not |
+| Bluetooth tethering as a way round | the phone connects over Bluetooth, and macOS creates **no network interface** for it: there is no IP path at all |
+
+⚠ **And one reading of ours was wrong, which is worth more than the ones that
+were right.** Repeated attempts failed in 5 ms with `EHOSTUNREACH`, which reads
+as an active ICMP rejection. It is not: it is **macOS's negative ARP cache**
+short-circuiting the attempt without putting a packet on the wire. After a
+reboot cleared it, the same ping took the full 4.5 seconds — a silent drop. A
+failure that is *too fast* is a failure that never left the machine.
+
+### What to do about it
+
+**Nothing in this repository needs it.** The direction that works is phone →
+workstation, and that is the direction the commands use: each one writes its
+verdict with `android.SaveTranscript`, which survives the cable being somewhere
+else, and `adb shell run-as <pkg> cat files/<name>.txt` collects it afterwards.
+
+There is a device flag that governs the protection, and turning it off is a
+decision for whoever owns the phone rather than something this README
+recommends:
+
+```sh
+adb shell device_config put android_core_networking \
+    android.permission.flags.access_local_network_permission_enabled false
+```
+
+It weakens a security protection for every application on the device, not just
+for development, and on a release build it may not take effect at all without a
+reboot — or at all.
+
 ## Building the APK
 
 No Gradle and no Kotlin: the host is three Java files and the application is a
@@ -1080,6 +1149,11 @@ Deliberate, and stated rather than hidden:
   reported as `ErrNotCapturable` rather than attempted. `MediaProjection`
   mirrors the default display; anything else needs `CAPTURE_VIDEO_OUTPUT`,
   which is `signature`;
+- **the workstation cannot reach the phone over Wi-Fi on Android 17**, so every
+  measurement here goes over the one USB-C port the glasses also want. See
+  [above](#-android-17-will-not-let-your-workstation-reach-the-phone): it is
+  Local Network Protection, it is mandatory from Android 17, and the commands
+  work around it by writing transcripts rather than by being reachable;
 - **the headset's camera needs usbfs, and none of that is written.** The census
   says the route and stops there: no external camera2 device on this phone, and
   every UVC streaming endpoint isochronous, so the frames are behind
