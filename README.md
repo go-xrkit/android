@@ -637,7 +637,21 @@ a span cannot run into the padding and corrupt the next one.
 
 `cmd/xrscreen` reports how many frames the host took. That number separates "the
 mechanism works" from "the mechanism runs and shows black", which is this
-feature's silent failure — and it is worth having for exactly that.
+feature's silent failure — and it is worth having for exactly that. On a
+**Pixel 11 Pro Fold** with **VITURE Beast** glasses:
+
+```
+TARGET display 13 "VITURE Beast" 1920x1080 @110dpi 60Hz (presentation)
+SCREEN screen on display 13, 1920x1080, 7680-byte rows, 0 presented, 0 acknowledged, 0 waits
+PAINTED 3600 frames of 1920x1080 in 2m0s, 30.0 fps
+STATS 3600 presented, 3600 acknowledged, 0 waits
+```
+
+**Zero waits over two minutes.** The host stayed ahead of the application
+throughout — 248 MB/s of copies through the shared buffer — so the queue depth
+was never the thing limiting the frame rate. The display id is 13 here and 12 in
+an earlier run: ids are per attachment and are good for logs and
+`dumpsys display`, nothing more.
 
 **It does not say a photon left the panel.** There is nothing to read back: an
 ordinary application may not capture a display it does not own, so unlike
@@ -908,7 +922,17 @@ glasses on its USB-C port. What that device answered, and nothing more:
 - owned displays go to **32768×1080**, with 0 wrong and 0 black pixels over
   35 389 440 sampled — see [`cmd/xrwide`](cmd/xrwide);
 - `startForeground` with `mediaProjection` and no consent **kills the process**
-  on API 37, which is why the host only goes foreground once consent exists.
+  on API 37, which is why the host only goes foreground once consent exists;
+- and the glasses take a `Presentation` carrying pixels Go painted —
+  [`cmd/xrscreen`](cmd/xrscreen), **3600 frames of 1920×1080 in 2m0s at 30.0 fps,
+  3600 acknowledged, 0 waits.** The queue never emptied: 248 MB/s of copies
+  through the shared buffer without once making the application wait for a slot.
+
+```
+TARGET display 13 "VITURE Beast" 1920x1080 @110dpi 60Hz (presentation)
+PAINTED 3600 frames of 1920x1080 in 2m0s, 30.0 fps
+STATS 3600 presented, 3600 acknowledged, 0 waits
+```
 
 Everything *else* below was measured on the **Android emulator**, API level 35
 (Android 15), `system-images/android-35/default/arm64-v8a`, running on an Apple
