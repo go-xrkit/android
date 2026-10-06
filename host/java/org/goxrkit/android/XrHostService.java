@@ -133,18 +133,38 @@ public final class XrHostService extends Service {
         new Thread(this::accept, "xr-host-accept").start();
     }
 
+    // ⛔⛔ THE FOREGROUND SERVICE IS STARTED ONLY ONCE CONSENT EXISTS. It used to
+    // be started on every onStartCommand, and Android 17 (API 37) enforces what
+    // 15 tolerated:
+    //
+    //   SecurityException: Starting FGS with type mediaProjection ... requires
+    //   [FOREGROUND_SERVICE_MEDIA_PROJECTION] and any of [CAPTURE_VIDEO_OUTPUT,
+    //   android:project_media] or Media projection screen capture permission
+    //
+    // And it does not refuse the call: it KILLS THE PROCESS, taking the wall
+    // host down with it. Measured on a Pixel 11 Pro Fold.
+    //
+    // ⚠ WHICH LEFT A DEADLOCK, and that is the part worth keeping: the Go side
+    // asks for consent THROUGH this host, so a host that cannot start without
+    // consent can never be asked for it. Everything that needs no projection at
+    // all -- the display list, which is how a pair of glasses is found -- was
+    // unreachable with it.
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Notification n = new Notification.Builder(this, CHANNEL)
-                // loadLabel, not getString(labelRes): a manifest label written
-                // as a literal has no resource id, and asking for id 0 is a
-                // fatal Resources$NotFoundException at the first frame.
-                .setContentTitle(getApplicationInfo().loadLabel(getPackageManager())
-                        + " is capturing the screen")
-                .setSmallIcon(android.R.drawable.ic_menu_camera)
-                .setOngoing(true)
-                .build();
-        startForeground(NOTIFICATION, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+        boolean granted = intent != null && ACTION_CONSENT.equals(intent.getAction())
+                && intent.getIntExtra(EXTRA_CODE, Activity_RESULT_CANCELED) == Activity_RESULT_OK;
+        if (granted) {
+            Notification n = new Notification.Builder(this, CHANNEL)
+                    // loadLabel, not getString(labelRes): a manifest label written
+                    // as a literal has no resource id, and asking for id 0 is a
+                    // fatal Resources$NotFoundException at the first frame.
+                    .setContentTitle(getApplicationInfo().loadLabel(getPackageManager())
+                            + " is capturing the screen")
+                    .setSmallIcon(android.R.drawable.ic_menu_camera)
+                    .setOngoing(true)
+                    .build();
+            startForeground(NOTIFICATION, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+        }
         if (intent != null && ACTION_CONSENT.equals(intent.getAction())) {
             onConsent(intent.getIntExtra(EXTRA_CODE, Activity_RESULT_CANCELED),
                     intent.getParcelableExtra(EXTRA_DATA, Intent.class));
