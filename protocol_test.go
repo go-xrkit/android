@@ -435,3 +435,205 @@ func TestTheScreenMessagesAreNumberedOnTheRightSide(t *testing.T) {
 		}
 	}
 }
+
+func TestCensusMessagesSurviveARoundTrip(t *testing.T) {
+	cams := []Camera{
+		{ID: "0", Facing: FacingBack, Width: 4000, Height: 3000},
+		{ID: "ext-usb-7", Facing: FacingExternal, Width: 1920, Height: 1080},
+	}
+	gotCams, err := DecodeCameras(EncodeCameras(cams))
+	if err != nil {
+		t.Fatalf("DecodeCameras: %v", err)
+	}
+	if len(gotCams) != len(cams) {
+		t.Fatalf("got %d cameras, want %d", len(gotCams), len(cams))
+	}
+	for i := range cams {
+		if gotCams[i] != cams[i] {
+			t.Fatalf("camera %d round-tripped to %+v, want %+v", i, gotCams[i], cams[i])
+		}
+	}
+
+	devs := []USBDevice{{
+		Name: "/dev/bus/usb/001/002", VendorID: VitureVendorID, ProductID: 0x1011,
+		Manufacturer: "VITURE", Product: "VITURE Beast", Class: USBClassPerInterface,
+		Interfaces: []USBInterface{
+			{Number: 1, Alternate: 0, Class: USBClassVideo, Subclass: USBSubclassVideoStreaming},
+			{Number: 1, Alternate: 1, Class: USBClassVideo, Subclass: USBSubclassVideoStreaming,
+				Endpoints: []USBEndpoint{{Address: 0x81, Attributes: 0x05, MaxPacketSize: 3072, Interval: 1}}},
+		},
+	}, {Name: "/dev/bus/usb/001/003"}}
+	gotDevs, err := DecodeUSBDevices(EncodeUSBDevices(devs))
+	if err != nil {
+		t.Fatalf("DecodeUSBDevices: %v", err)
+	}
+	if len(gotDevs) != 2 || len(gotDevs[0].Interfaces) != 2 ||
+		len(gotDevs[0].Interfaces[1].Endpoints) != 1 {
+		t.Fatalf("the device tree did not survive: %+v", gotDevs)
+	}
+	// ⛔ THE ENDPOINT IS THE ANSWER THE CENSUS EXISTS FOR, so it is compared
+	// field by field rather than counted: a transport that dropped bmAttributes
+	// would make every camera look readable.
+	if got, want := gotDevs[0].Interfaces[1].Endpoints[0], devs[0].Interfaces[1].Endpoints[0]; got != want {
+		t.Fatalf("the endpoint round-tripped to %+v, want %+v", got, want)
+	}
+	if !gotDevs[0].Viture() || gotDevs[0].BulkVideo() {
+		t.Fatalf("the decoded device is %s", gotDevs[0])
+	}
+	// A device with nothing in it must survive too: an empty interface list is
+	// what a hub or a charger looks like.
+	if len(gotDevs[1].Interfaces) != 0 || gotDevs[1].Name != "/dev/bus/usb/001/003" {
+		t.Fatalf("the empty device round-tripped to %+v", gotDevs[1])
+	}
+}
+
+// Every way a census message can be truncated or impossible. The host is a
+// separate process, and a count it announced must never be believed far enough
+// to allocate for.
+func TestCensusMessagesRefuseWhatCannotBeDecoded(t *testing.T) {
+	// A count of two billion with no bytes behind it. Believing it would turn
+	// one message into an out-of-memory.
+	huge := appendInt32(nil, 1<<30)
+	for _, c := range []struct {
+		name string
+		body []byte
+		call func([]byte) error
+		is   error
+	}{
+		{"cameras, no count", make([]byte, 3),
+			func(b []byte) error { _, err := DecodeCameras(b); return err }, ErrShortPayload},
+		{"cameras, negative count", appendInt32(nil, -1),
+			func(b []byte) error { _, err := DecodeCameras(b); return err }, ErrBadPayload},
+		{"cameras, a count nothing could fill", huge,
+			func(b []byte) error { _, err := DecodeCameras(b); return err }, ErrShortPayload},
+		{"cameras, truncated after the id", append(appendInt32(nil, 1), 0, 1, 'x', 0, 0),
+			func(b []byte) error { _, err := DecodeCameras(b); return err }, ErrShortPayload},
+		{"usb, no count", make([]byte, 3),
+			func(b []byte) error { _, err := DecodeUSBDevices(b); return err }, ErrShortPayload},
+		{"usb, negative count", appendInt32(nil, -1),
+			func(b []byte) error { _, err := DecodeUSBDevices(b); return err }, ErrBadPayload},
+		{"usb, truncated after the name", append(appendInt32(nil, 1), 0, 0, 1, 2),
+			func(b []byte) error { _, err := DecodeUSBDevices(b); return err }, ErrShortPayload},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.call(c.body)
+			if !errors.Is(err, c.is) {
+				t.Fatalf("decoding %d bytes reported %v, want %v", len(c.body), err, c.is)
+			}
+		})
+	}
+}
+
+// A device whose counts are impossible, built field by field so each refusal is
+// reached deliberately rather than by chance.
+func TestAUSBDeviceWithImpossibleCountsIsRefused(t *testing.T) {
+	head := func() []byte {
+		b := appendString(nil, "/dev/bus/usb/001/002")
+		b = appendInt32(b, 0x35ca)
+		b = appendInt32(b, 1)
+		b = appendString(b, "")
+		return appendString(b, "")
+	}
+	negIfaces := append(appendInt32(nil, 1), head()...)
+	negIfaces = appendInt32(negIfaces, 0)
+	negIfaces = appendInt32(negIfaces, 0)
+	negIfaces = appendInt32(negIfaces, 0)
+	negIfaces = appendInt32(negIfaces, -1)
+	if _, err := DecodeUSBDevices(negIfaces); !errors.Is(err, ErrBadPayload) {
+		t.Fatalf("a device with -1 interfaces reported %v", err)
+	}
+
+	truncIface := append(appendInt32(nil, 1), head()...)
+	for _, v := range []int{0, 0, 0, 1} {
+		truncIface = appendInt32(truncIface, v)
+	}
+	if _, err := DecodeUSBDevices(truncIface); !errors.Is(err, ErrShortPayload) {
+		t.Fatalf("a device promising an interface that is not there reported %v", err)
+	}
+
+	negEps := append(appendInt32(nil, 1), head()...)
+	for _, v := range []int{0, 0, 0, 1 /* iface */, 0, 0, 0, 0, 0, -1} {
+		negEps = appendInt32(negEps, v)
+	}
+	if _, err := DecodeUSBDevices(negEps); !errors.Is(err, ErrBadPayload) {
+		t.Fatalf("an interface with -1 endpoints reported %v", err)
+	}
+
+	truncEp := append(appendInt32(nil, 1), head()...)
+	for _, v := range []int{0, 0, 0, 1 /* iface */, 0, 0, 0, 0, 0, 1} {
+		truncEp = appendInt32(truncEp, v)
+	}
+	if _, err := DecodeUSBDevices(truncEp); !errors.Is(err, ErrShortPayload) {
+		t.Fatalf("an interface promising an endpoint that is not there reported %v", err)
+	}
+
+	// And a device truncated between its name and its strings.
+	short := append(appendInt32(nil, 1), appendString(nil, "x")...)
+	short = appendInt32(short, 1)
+	short = appendInt32(short, 1)
+	short = append(short, 0) // half a string length
+	if _, err := DecodeUSBDevices(short); !errors.Is(err, ErrShortPayload) {
+		t.Fatalf("a device truncated mid-string reported %v", err)
+	}
+}
+
+// A length-prefixed string whose bytes are not all there. It is its own test
+// because the obvious truncation — stopping after a COMPLETE string — reaches a
+// different branch, and the two were confused once already: a body that ends
+// mid-string must be refused before the length is used to slice.
+func TestACensusStringThatIsNotAllThereIsRefused(t *testing.T) {
+	// A string claiming five bytes with one behind it.
+	cut := []byte{0x00, 0x05, 'a'}
+
+	if _, err := DecodeCameras(append(appendInt32(nil, 1), cut...)); !errors.Is(err, ErrShortPayload) {
+		t.Fatalf("a camera id cut short reported %v", err)
+	}
+	if _, err := DecodeUSBDevices(append(appendInt32(nil, 1), cut...)); !errors.Is(err, ErrShortPayload) {
+		t.Fatalf("a usb device name cut short reported %v", err)
+	}
+
+	// Past the name and the ids, with the PRODUCT string cut short.
+	prod := append(appendInt32(nil, 1), appendString(nil, "/dev/bus/usb/001/002")...)
+	prod = appendInt32(prod, 0x35ca)
+	prod = appendInt32(prod, 1)
+	prod = appendString(prod, "VITURE")
+	prod = append(prod, cut...)
+	if _, err := DecodeUSBDevices(prod); !errors.Is(err, ErrShortPayload) {
+		t.Fatalf("a usb product string cut short reported %v", err)
+	}
+
+	// Both strings complete, and then nothing where the class triple and the
+	// interface count should be.
+	after := append(appendInt32(nil, 1), appendString(nil, "/dev/bus/usb/001/002")...)
+	after = appendInt32(after, 0x35ca)
+	after = appendInt32(after, 1)
+	after = appendString(after, "")
+	after = appendString(after, "")
+	after = append(after, 1, 2, 3)
+	if _, err := DecodeUSBDevices(after); !errors.Is(err, ErrShortPayload) {
+		t.Fatalf("a usb device truncated after its strings reported %v", err)
+	}
+}
+
+// ⛔ THE CHEAP GUARD HIDES THE CAREFUL ONES. DecodeCameras refuses a count that
+// could not possibly fit before it allocates, and that guard swallows every
+// short body an obvious test writes — so the per-camera checks behind it went
+// unexercised while looking tested. These bodies are long enough to get past
+// it and still wrong.
+func TestACameraListLongEnoughToPassTheCheapGuardAndStillWrong(t *testing.T) {
+	// 15 bytes for one camera, so the count guard lets it through — and the id
+	// claims 255 bytes with 13 behind it.
+	cut := append(appendInt32(nil, 1), 0x00, 0xff)
+	cut = append(cut, make([]byte, 13)...)
+	if _, err := DecodeCameras(cut); !errors.Is(err, ErrShortPayload) {
+		t.Fatalf("a camera id claiming more than the body holds reported %v", err)
+	}
+
+	// A complete ten-character id, and then three bytes where twelve of facing
+	// and size should be.
+	short := append(appendInt32(nil, 1), appendString(nil, "0123456789")...)
+	short = append(short, 1, 2, 3)
+	if _, err := DecodeCameras(short); !errors.Is(err, ErrShortPayload) {
+		t.Fatalf("a camera truncated after its id reported %v", err)
+	}
+}

@@ -690,6 +690,72 @@ USB-C port and the glasses want all of it: the command is started over the cable
 that then has to be moved. A command that read the display list at startup could
 only ever report the phone's own panel.
 
+## Following a head: the census, and the answer it gave
+
+An XR ribbon has to know where somebody is looking, and **a VITURE Beast will
+not say.** It holds its own 3DOF tracking and anchors the picture it is given
+with it, but publishes no orientation at all — measured three ways on
+2026-09-07 and none of them produced a number. See
+[`go-xrkit/xrkit/headflow`](https://github.com/go-xrkit/xrkit), which recovers
+the yaw from the headset's **camera** instead, at 1.14 % residual over a
+there-and-back sweep.
+
+On macOS that camera is an AVFoundation device and the matter ends there. On
+Android it was not obvious an application could reach it at all, and there are
+exactly two routes — so this package **asks** rather than guessing:
+
+```go
+cams, _ := android.Cameras(ctx)      // camera2, including LENS_FACING_EXTERNAL
+devs, _ := android.USBDevices(ctx)   // every interface, down to its endpoints
+route := android.ChooseRoute(cams, devs)
+```
+
+Neither needs a permission. `android.permission.CAMERA` is required to **open** a
+camera and a USB permission to **open** a device; being told one is there is
+free. So the census costs nobody a dialog, which is what makes it usable before
+anything is decided. It is served by the wall host for exactly that reason.
+
+### ⛔ The answer on a Pixel 11 Pro Fold: neither Android API can read it
+
+Attaching the Beast adds **three** USB devices and **no camera2 device at all**:
+
+```
+BEFORE  2 camera(s): back 4000x3000, front 3840x2800 — 0 USB device(s)
+AFTER   2 camera(s) — unchanged — and 3 USB device(s)
+
+35ca:1102 "VITURE Microphone"        audio + 3 HID interfaces
+0c45:6368 "USB 2.0 Camera" (Sonix)   UVC, 6 alternate settings
+   interface 1 alt 1..6 class 0x0e/0x02  ep 0x81 in ISOCHRONOUS max 128..5120
+35ca:1201 "VITURE Beast XR Glasses"  CDC-ACM + CDC data + audio + HID
+   interface 1 class 0x0a            ep 0x83 in BULK 512, ep 0x03 out BULK 512
+   interface 5 class 0x03            ep 0x85 in INTERRUPT 64
+
+ROUTE USB, isochronous UVC
+```
+
+Two things decide it, and both are measurements rather than readings of the
+documentation:
+
+| | |
+|---|---|
+| **camera2 offers nothing** | the list is identical before and after. Supporting external USB cameras is left to the vendor's HAL, and this one does not |
+| **every streaming endpoint is isochronous** | and Android's Java USB API submits control, bulk and interrupt transfers and **nothing else** — there is no isochronous request in `UsbDeviceConnection` or `UsbRequest`, which is why every UVC library on Android carries a native libusb |
+
+So reaching those frames means **usbfs ioctls** on the descriptor
+`UsbDeviceConnection.getFileDescriptor()` hands out — `USBDEVFS_SUBMITURB` with
+`USBDEVFS_URB_TYPE_ISO`, which is plain syscalls and therefore reachable from
+CGO-free Go, and a great deal more work than either of the other two routes.
+Nothing of it is written here.
+
+### What IS open, which is not nothing
+
+`USBDevice.Readable` keeps the interfaces whose IN endpoints Android's own API
+can carry. On the Beast that is three: the CDC-ACM control interface, its bulk
+data interface, and a HID interface. **"The camera is closed" is not "there is
+nothing to read"**, and a census that could not tell *unreachable* from
+*reachable and silent* would be worth little — the 2026-09-07 finding is that
+the headset says nothing about its orientation, not that nothing can be asked.
+
 ## Input
 
 Nothing new is needed, and that is the finding rather than an omission. A
@@ -946,7 +1012,10 @@ glasses on its USB-C port. What that device answered, and nothing more:
   through the shared buffer without once making the application wait for a slot.
   The person wearing them [saw colour and saw it
   move](#what-the-witness-reported), which is the only evidence this half of the
-  package can have.
+  package can have;
+- and the headset's CAMERA is reachable through neither Android API on this
+  phone — no external camera2 device, every UVC streaming endpoint isochronous.
+  See [the census](#following-a-head-the-census-and-the-answer-it-gave).
 
 ```
 TARGET display 13 "VITURE Beast" 1920x1080 @110dpi 60Hz (presentation)
@@ -1004,13 +1073,19 @@ in yourself and tell us what `adb shell dumpsys display` said.
 Deliberate, and stated rather than hidden:
 
 - **most of the capture figures are still the emulator's** — the Fold answered
-  the display, wide-display and API 37 questions; the frame rates, the ceiling
+  the display, wide-display, API 37 and camera-census questions; the frame rates, the ceiling
   of 304 and the consent flow were not re-measured on it, and the section above
   says which is which;
 - **capture of a second display is impossible** for an unprivileged app and is
   reported as `ErrNotCapturable` rather than attempted. `MediaProjection`
   mirrors the default display; anything else needs `CAPTURE_VIDEO_OUTPUT`,
   which is `signature`;
+- **the headset's camera needs usbfs, and none of that is written.** The census
+  says the route and stops there: no external camera2 device on this phone, and
+  every UVC streaming endpoint isochronous, so the frames are behind
+  USBDEVFS_SUBMITURB on the descriptor Android hands out. Head tracking on
+  Android is therefore NOT implemented, and the measurement says why rather than
+  the plan saying when;
 - **nobody has read a pixel back off the glasses, and nobody can.** An ordinary
   application may not capture a display it does not own, so
   [`Screen`](#painting-on-the-glasses-from-go) can report how many frames the

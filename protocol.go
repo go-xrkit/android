@@ -747,3 +747,189 @@ func DecodePresented(b []byte) (PresentedMessage, error) {
 	}
 	return PresentedMessage{Seq: int64(binary.BigEndian.Uint64(b)), Slot: int32At(b, 8)}, nil
 }
+
+// CensusMessage types. The census asks what hardware is there, which needs no
+// permission of any kind; see census.go.
+const (
+	// MsgCameras answers MsgListCameras with every camera the camera2 API can
+	// see, including external ones.
+	MsgCameras uint8 = 0x09
+	// MsgUSBDevices answers MsgListUSBDevices with every device on the USB host
+	// port, down to each interface's endpoints.
+	MsgUSBDevices uint8 = 0x0a
+
+	// MsgListCameras asks the host what cameras exist.
+	MsgListCameras uint8 = 0x89
+	// MsgListUSBDevices asks the host what is attached to the USB host port.
+	//
+	// It reads the device list, which needs no permission: a permission is
+	// needed to OPEN a device, not to see that it is there. So a census costs
+	// the user no dialog, which is what makes it usable before deciding
+	// anything.
+	MsgListUSBDevices uint8 = 0x8a
+)
+
+// EncodeCameras encodes a camera list.
+func EncodeCameras(cs []Camera) []byte {
+	b := appendInt32(nil, len(cs))
+	for _, c := range cs {
+		b = appendString(b, c.ID)
+		b = appendInt32(b, int(c.Facing))
+		b = appendInt32(b, c.Width)
+		b = appendInt32(b, c.Height)
+	}
+	return b
+}
+
+// DecodeCameras decodes a camera list.
+func DecodeCameras(b []byte) ([]Camera, error) {
+	if len(b) < 4 {
+		return nil, fmt.Errorf("%w: cameras is %d bytes, want at least 4", ErrShortPayload, len(b))
+	}
+	n := int32At(b, 0)
+	if n < 0 {
+		return nil, fmt.Errorf("%w: negative camera count %d", ErrBadPayload, n)
+	}
+	rest := b[4:]
+	// Every entry is at least a 2-byte name length and three int32s, so a count
+	// that could not possibly fit is refused before anything is allocated.
+	if min := n * 14; len(rest) < min {
+		return nil, fmt.Errorf("%w: %d cameras need at least %d bytes, got %d",
+			ErrShortPayload, n, min, len(rest))
+	}
+	cs := make([]Camera, 0, min(n, len(rest)/14+1))
+	for i := 0; i < n; i++ {
+		var c Camera
+		var err error
+		c.ID, rest, err = takeString(rest)
+		if err != nil {
+			return nil, err
+		}
+		if len(rest) < 12 {
+			return nil, fmt.Errorf("%w: camera %d truncated after its id", ErrShortPayload, i)
+		}
+		c.Facing = CameraFacing(int32At(rest, 0))
+		c.Width = int32At(rest, 4)
+		c.Height = int32At(rest, 8)
+		rest = rest[12:]
+		cs = append(cs, c)
+	}
+	return cs, nil
+}
+
+// EncodeUSBDevices encodes a USB device list, down to each endpoint.
+func EncodeUSBDevices(ds []USBDevice) []byte {
+	b := appendInt32(nil, len(ds))
+	for _, d := range ds {
+		b = appendString(b, d.Name)
+		b = appendInt32(b, d.VendorID)
+		b = appendInt32(b, d.ProductID)
+		b = appendString(b, d.Manufacturer)
+		b = appendString(b, d.Product)
+		b = appendInt32(b, d.Class)
+		b = appendInt32(b, d.Subclass)
+		b = appendInt32(b, d.Protocol)
+		b = appendInt32(b, len(d.Interfaces))
+		for _, i := range d.Interfaces {
+			b = appendInt32(b, i.Number)
+			b = appendInt32(b, i.Alternate)
+			b = appendInt32(b, i.Class)
+			b = appendInt32(b, i.Subclass)
+			b = appendInt32(b, i.Protocol)
+			b = appendInt32(b, len(i.Endpoints))
+			for _, e := range i.Endpoints {
+				b = appendInt32(b, e.Address)
+				b = appendInt32(b, e.Attributes)
+				b = appendInt32(b, e.MaxPacketSize)
+				b = appendInt32(b, e.Interval)
+			}
+		}
+	}
+	return b
+}
+
+// DecodeUSBDevices decodes a USB device list.
+func DecodeUSBDevices(b []byte) ([]USBDevice, error) {
+	n, rest, err := takeCount(b, "usb devices")
+	if err != nil {
+		return nil, err
+	}
+	// The smallest a device entry can be is two empty-string lengths, its two
+	// ids, its class triple and an interface count: 30 bytes. Capacity is bounded
+	// by what is actually LEFT rather than by the count, so a host that announced
+	// two billion devices cannot turn one message into an out-of-memory.
+	ds := make([]USBDevice, 0, min(n, len(rest)/30+1))
+	for i := 0; i < n; i++ {
+		var d USBDevice
+		if d.Name, rest, err = takeString(rest); err != nil {
+			return nil, err
+		}
+		if len(rest) < 8 {
+			return nil, fmt.Errorf("%w: usb device %d truncated after its name", ErrShortPayload, i)
+		}
+		d.VendorID, d.ProductID = int32At(rest, 0), int32At(rest, 4)
+		rest = rest[8:]
+		if d.Manufacturer, rest, err = takeString(rest); err != nil {
+			return nil, err
+		}
+		if d.Product, rest, err = takeString(rest); err != nil {
+			return nil, err
+		}
+		if len(rest) < 16 {
+			return nil, fmt.Errorf("%w: usb device %d truncated after its strings", ErrShortPayload, i)
+		}
+		d.Class, d.Subclass, d.Protocol = int32At(rest, 0), int32At(rest, 4), int32At(rest, 8)
+		ni := int32At(rest, 12)
+		rest = rest[16:]
+		if ni < 0 {
+			return nil, fmt.Errorf("%w: usb device %d has %d interfaces", ErrBadPayload, i, ni)
+		}
+		d.Interfaces = make([]USBInterface, 0, min(ni, len(rest)/24+1))
+		for j := 0; j < ni; j++ {
+			if len(rest) < 24 {
+				return nil, fmt.Errorf("%w: usb device %d interface %d truncated",
+					ErrShortPayload, i, j)
+			}
+			iface := USBInterface{
+				Number: int32At(rest, 0), Alternate: int32At(rest, 4),
+				Class: int32At(rest, 8), Subclass: int32At(rest, 12), Protocol: int32At(rest, 16),
+			}
+			ne := int32At(rest, 20)
+			rest = rest[24:]
+			if ne < 0 {
+				return nil, fmt.Errorf("%w: interface %d has %d endpoints", ErrBadPayload, j, ne)
+			}
+			iface.Endpoints = make([]USBEndpoint, 0, min(ne, len(rest)/16+1))
+			for k := 0; k < ne; k++ {
+				if len(rest) < 16 {
+					return nil, fmt.Errorf("%w: usb device %d interface %d endpoint %d truncated",
+						ErrShortPayload, i, j, k)
+				}
+				iface.Endpoints = append(iface.Endpoints, USBEndpoint{
+					Address: int32At(rest, 0), Attributes: int32At(rest, 4),
+					MaxPacketSize: int32At(rest, 8), Interval: int32At(rest, 12),
+				})
+				rest = rest[16:]
+			}
+			d.Interfaces = append(d.Interfaces, iface)
+		}
+		ds = append(ds, d)
+	}
+	return ds, nil
+}
+
+// takeCount reads a leading count and refuses one that is negative.
+//
+// ⛔ THE CAPACITY IS BOUNDED BY WHAT IS LEFT, not by the count. A host that
+// announced two billion interfaces would otherwise have this allocate for them
+// before reading a byte, which is a message turning into an out-of-memory.
+func takeCount(b []byte, what string) (int, []byte, error) {
+	if len(b) < 4 {
+		return 0, nil, fmt.Errorf("%w: %s is %d bytes, want at least 4", ErrShortPayload, what, len(b))
+	}
+	n := int32At(b, 0)
+	if n < 0 {
+		return 0, nil, fmt.Errorf("%w: negative %s count %d", ErrBadPayload, what, n)
+	}
+	return n, b[4:], nil
+}

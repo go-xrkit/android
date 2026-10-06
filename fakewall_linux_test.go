@@ -38,6 +38,10 @@ type fakeWall struct {
 	onScreen  func(*fakePanel, OpenScreenMessage) bool
 	onPresent func(*fakePanel, PresentMessage) bool
 	onList    func(*fakePanel) bool
+
+	cameras  []Camera
+	usbDevs  []USBDevice
+	onCensus func(*fakePanel, uint8) bool
 }
 
 // fakePanel is one connection, and therefore one owned display.
@@ -185,6 +189,18 @@ func (p *fakePanel) handle(typ uint8, body []byte) {
 			return
 		}
 		p.send(MsgDisplays, EncodeDisplays(ds))
+	case MsgListCameras, MsgListUSBDevices:
+		p.w.mu.Lock()
+		cs, ds, hook := p.w.cameras, p.w.usbDevs, p.w.onCensus
+		p.w.mu.Unlock()
+		if hook != nil && hook(p, typ) {
+			return
+		}
+		if typ == MsgListCameras {
+			p.send(MsgCameras, EncodeCameras(cs))
+		} else {
+			p.send(MsgUSBDevices, EncodeUSBDevices(ds))
+		}
 	case MsgOpenScreen:
 		m, err := DecodeOpenScreen(body)
 		if err != nil {
@@ -394,4 +410,19 @@ func (w *fakeWall) panel(t testing.TB) *fakePanel {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// setCensus installs what this host answers the census with.
+func (w *fakeWall) setCensus(cs []Camera, ds []USBDevice) {
+	w.mu.Lock()
+	w.cameras, w.usbDevs = cs, ds
+	w.mu.Unlock()
+}
+
+// setOnCensus installs a hook that may answer a census question itself.
+// Returning false takes the default behaviour.
+func (w *fakeWall) setOnCensus(fn func(*fakePanel, uint8) bool) {
+	w.mu.Lock()
+	w.onCensus = fn
+	w.mu.Unlock()
 }

@@ -22,6 +22,14 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- GW_PERMISSIONS -->
 
+    <!-- ⚠ DECLARED, NOT REQUIRED. A headset's camera is a USB device, and
+         whether this application can reach it is a per-device measurement: the
+         UsbManager census in XrWallService needs no permission, but a phone
+         with no USB host support at all has no UsbManager to ask. Marking it
+         required="true" would hide this APK from every such device in the
+         store, including ones where everything else here works. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
     <!-- ⛔ DEBUGGABLE, BECAUSE AN ARTEFACT NOBODY CAN READ IS NOT AN ARTEFACT.
          The commands here write their verdict to the app's external files
          directory so that it survives a run nobody could watch: the phone has
