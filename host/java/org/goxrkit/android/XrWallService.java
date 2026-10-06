@@ -61,6 +61,21 @@ import java.util.concurrent.atomic.AtomicInteger;
  * copy of the same socket plumbing. What differs is which display carries the
  * Presentation and which way the pixels travel.
  *
+ * <h2>And everything else an application may ask for FREE OF CHARGE</h2>
+ *
+ * This host also answers the <b>census</b>: what displays, cameras and USB
+ * devices exist. Those are not Presentations, and they are here for a property
+ * that is checkable rather than for convenience — <b>they need no permission,
+ * no consent and no foreground service</b>, which is exactly what this service
+ * is. Listing a camera needs no CAMERA permission; listing a USB device needs
+ * no USB permission; a display list needs no MediaProjection. All three are
+ * required to OPEN the thing, never to be told it is there.
+ *
+ * <p>So an application that wants to paint on the glasses and follow a head
+ * can find out everything it needs to DECIDE without putting a single dialog in
+ * front of anybody. The moment something has to be opened, it stops belonging
+ * here.
+ *
  * <p>It is a second service rather than part of {@link XrHostService} because
  * the two have nothing in common but a wire format. Capture needs a
  * MediaProjection, a consent dialog and — from API 34 — a mediaProjection
@@ -102,6 +117,8 @@ public final class XrWallService extends Service {
     private static final int MSG_OPEN_DISPLAY = 0x86, MSG_STOP = 0x84, MSG_BYE = 0x85;
     private static final int MSG_OPEN_SCREEN = 0x87, MSG_PRESENT = 0x88;
     private static final int MSG_DISPLAYS = 0x01, MSG_LIST_DISPLAYS = 0x81;
+    private static final int MSG_CAMERAS = 0x09, MSG_USB_DEVICES = 0x0a;
+    private static final int MSG_LIST_CAMERAS = 0x89, MSG_LIST_USB_DEVICES = 0x8a;
 
     private static final int STOP_SYSTEM = 1, STOP_APP = 2;
     private static final int CODE_NOT_FOUND = 3;
@@ -248,6 +265,12 @@ public final class XrWallService extends Service {
                 case MSG_LIST_DISPLAYS:
                     handler.post(this::sendDisplays);
                     break;
+                case MSG_LIST_CAMERAS:
+                    handler.post(this::sendCameras);
+                    break;
+                case MSG_LIST_USB_DEVICES:
+                    handler.post(this::sendUsbDevices);
+                    break;
                 case MSG_OPEN_SCREEN:
                     handler.post(() -> openScreen(body));
                     break;
@@ -392,6 +415,127 @@ public final class XrWallService extends Service {
                 e.i32(d.getFlags());
             }
             send(MSG_DISPLAYS, e.bytes());
+        }
+
+        /**
+         * Answers what cameras exist, including external USB ones.
+         *
+         * <p>⛔ NO PERMISSION IS ASKED FOR, AND NONE IS NEEDED.
+         * android.permission.CAMERA is required to OPEN a camera, not to be
+         * told one is there. A census that cost the user a dialog would be a
+         * census nobody runs.
+         *
+         * <p>The answer that matters is whether anything comes back with
+         * LENS_FACING_EXTERNAL: supporting external USB cameras is left to the
+         * vendor's HAL, so whether a headset's camera is reachable through the
+         * platform is a per-device measurement with no documentation that
+         * settles it.
+         */
+        private void sendCameras() {
+            Enc e = new Enc();
+            android.hardware.camera2.CameraManager cm =
+                    getSystemService(android.hardware.camera2.CameraManager.class);
+            String[] ids;
+            try {
+                ids = cm.getCameraIdList();
+            } catch (Throwable t) {
+                error(0, "getCameraIdList", String.valueOf(t));
+                return;
+            }
+            e.i32(ids.length);
+            for (String id : ids) {
+                int facing = -1, w = 0, h = 0;
+                try {
+                    android.hardware.camera2.CameraCharacteristics c =
+                            cm.getCameraCharacteristics(id);
+                    Integer f = c.get(android.hardware.camera2.CameraCharacteristics.LENS_FACING);
+                    if (f != null) {
+                        facing = f;
+                    }
+                    android.hardware.camera2.params.StreamConfigurationMap m = c.get(
+                            android.hardware.camera2.CameraCharacteristics
+                                    .SCALER_STREAM_CONFIGURATION_MAP);
+                    if (m != null) {
+                        android.util.Size[] sizes = m.getOutputSizes(android.graphics.ImageFormat.YUV_420_888);
+                        if (sizes != null) {
+                            for (android.util.Size s : sizes) {
+                                if ((long) s.getWidth() * s.getHeight() > (long) w * h) {
+                                    w = s.getWidth();
+                                    h = s.getHeight();
+                                }
+                            }
+                        }
+                    }
+                } catch (Throwable t) {
+                    // A camera that will not describe itself is still a camera
+                    // that is THERE, and saying so with zeroes beats dropping
+                    // it from the list and reporting one fewer.
+                    Log.w(TAG, "characteristics of camera " + id + ": " + t);
+                }
+                e.str(id);
+                e.i32(facing);
+                e.i32(w);
+                e.i32(h);
+            }
+            send(MSG_CAMERAS, e.bytes());
+        }
+
+        /**
+         * Answers what is attached to the USB host port, down to each
+         * interface's endpoints.
+         *
+         * <p>The endpoints are the whole point. Android's Java USB API submits
+         * control, bulk and interrupt transfers and <b>nothing else</b> — there
+         * is no isochronous request in UsbDeviceConnection or UsbRequest — so
+         * whether a UVC camera can be read through it comes down to whether its
+         * streaming endpoints are bulk. Nothing but a census says.
+         *
+         * <p>Listing needs no permission either: a USB permission is granted
+         * against a device in order to OPEN it, and the device list is public.
+         */
+        private void sendUsbDevices() {
+            android.hardware.usb.UsbManager um =
+                    getSystemService(android.hardware.usb.UsbManager.class);
+            Enc e = new Enc();
+            if (um == null) {
+                // A phone with no USB host support at all. Zero devices is the
+                // honest answer and is not the same as an error.
+                Log.w(TAG, "no UsbManager: this device has no USB host support");
+                e.i32(0);
+                send(MSG_USB_DEVICES, e.bytes());
+                return;
+            }
+            java.util.Collection<android.hardware.usb.UsbDevice> devs =
+                    um.getDeviceList().values();
+            e.i32(devs.size());
+            for (android.hardware.usb.UsbDevice d : devs) {
+                e.str(d.getDeviceName());
+                e.i32(d.getVendorId());
+                e.i32(d.getProductId());
+                e.str(d.getManufacturerName() == null ? "" : d.getManufacturerName());
+                e.str(d.getProductName() == null ? "" : d.getProductName());
+                e.i32(d.getDeviceClass());
+                e.i32(d.getDeviceSubclass());
+                e.i32(d.getDeviceProtocol());
+                e.i32(d.getInterfaceCount());
+                for (int i = 0; i < d.getInterfaceCount(); i++) {
+                    android.hardware.usb.UsbInterface in = d.getInterface(i);
+                    e.i32(in.getId());
+                    e.i32(in.getAlternateSetting());
+                    e.i32(in.getInterfaceClass());
+                    e.i32(in.getInterfaceSubclass());
+                    e.i32(in.getInterfaceProtocol());
+                    e.i32(in.getEndpointCount());
+                    for (int j = 0; j < in.getEndpointCount(); j++) {
+                        android.hardware.usb.UsbEndpoint ep = in.getEndpoint(j);
+                        e.i32(ep.getAddress());
+                        e.i32(ep.getAttributes());
+                        e.i32(ep.getMaxPacketSize());
+                        e.i32(ep.getInterval());
+                    }
+                }
+            }
+            send(MSG_USB_DEVICES, e.bytes());
         }
 
         /**
