@@ -660,6 +660,23 @@ only instrument and the person wearing them is the only witness, which is why
 what gets drawn is deliberately unmistakable — flat quadrants of known colour
 with a bar sweeping across — so that one glance settles the rest.
 
+### What the witness reported
+
+**Colour, and movement.** The person wearing the Beast saw the quadrants, and
+saw them *change*, on the run transcribed above.
+
+Both halves were asked for separately and both matter, because they refute
+different failures. Colour alone refutes a black panel — the one an
+acknowledgement count cannot see. **Movement refutes a screen frozen on its
+first frame**, which is what a host that showed one bitmap and then stopped
+copying would look like: 3600 acknowledgements and one picture. That is the
+whole reason the bar is in the frame rather than a still pattern, and it is why
+it was asked about on its own after "I saw colours" came back.
+
+This is a person's report, written down as a person's report. It is not a
+measurement, it does not belong in a table with the frame counts, and it is the
+best evidence that exists for this half of the package.
+
 ```sh
 APP=./cmd/xrscreen host/build.sh && adb install -r host/out/xrhost.apk
 adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity \
@@ -927,6 +944,9 @@ glasses on its USB-C port. What that device answered, and nothing more:
   [`cmd/xrscreen`](cmd/xrscreen), **3600 frames of 1920×1080 in 2m0s at 30.0 fps,
   3600 acknowledged, 0 waits.** The queue never emptied: 248 MB/s of copies
   through the shared buffer without once making the application wait for a slot.
+  The person wearing them [saw colour and saw it
+  move](#what-the-witness-reported), which is the only evidence this half of the
+  package can have.
 
 ```
 TARGET display 13 "VITURE Beast" 1920x1080 @110dpi 60Hz (presentation)
@@ -997,7 +1017,8 @@ Deliberate, and stated rather than hidden:
   host took and nothing more. The transport is measured end to end against a
   real socket and a real shared mapping — what the application draws is asserted
   to be the bytes the host finds — but between the host's bitmap and the panel
-  there is only a person looking;
+  there is only [a person looking](#what-the-witness-reported), and that will not
+  change: the gap is in what Android permits, not in what is written here;
 - **only two `Content` kinds exist.** `Web` and `Sentinel`. `MediaCodec`,
   `PdfRenderer` and a maps view are the obvious next ones and none is written;
 - **the limit is 32 by construction, not by measurement on hardware.** It is

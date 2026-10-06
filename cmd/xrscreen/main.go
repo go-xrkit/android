@@ -23,6 +23,13 @@
 // failure. It does NOT say a photon left the panel. What is drawn is therefore
 // deliberately unmistakable — flat quadrants of known colour and a bar that
 // sweeps — so that ONE GLANCE through the glasses settles the rest.
+//
+// ⚠ THE BAR IS NOT DECORATION. Colour alone refutes a black panel. The bar
+// refutes a screen FROZEN ON ITS FIRST FRAME, which is what a host that showed
+// one bitmap and then stopped copying looks like: 3600 acknowledgements and one
+// picture. The two failures need two different things to look at, so a witness
+// has to be asked about both — and on the Pixel 11 Pro Fold with VITURE Beast
+// glasses, both were reported: colour, and movement.
 package main
 
 import (
