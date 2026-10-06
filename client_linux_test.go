@@ -903,3 +903,99 @@ func TestAnEmptyReadIsEndOfStream(t *testing.T) {
 		t.Errorf("Read of an empty message = %v, want io.EOF", err)
 	}
 }
+
+// ⛔⛔ A HANDSHAKE IS TWO MESSAGES, AND THE PUMP MUST HOLD BOTH.
+//
+// The host answers MsgStart — and MsgOpenDisplay, and MsgOpenScreen — with
+// MsgConfig and then MsgBuffer, sent back to back. The pump holds what the
+// caller has not consumed yet, and with room for ONE it dropped the buffer
+// whenever it read both before the caller woke: the caller then waited out its
+// whole context for a descriptor that was already closed, with nothing logged.
+//
+// It showed up as TestCaptureRefusesABufferThatDoesNotMatchTheConfig and
+// TestWallOpensSeveralIndependentDisplays failing about once in thirteen runs
+// on one CPU, which reads as flakiness. It is not: a real host sends the same
+// two messages back to back, so a loaded phone reaches it the same way, and the
+// symptom there is a capture that never starts.
+//
+// This drives the pump with nobody waiting, which is the condition, rather than
+// racing a goroutine against a sleep and hoping.
+func TestThePumpHoldsBothHalvesOfAHandshake(t *testing.T) {
+	f := newFake(t)
+	s, err := connect()
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	// ⛔ ONE REAL ROUND TRIP FIRST. The fake only writes once it has ACCEPTED
+	// the connection, and its send is a silent no-op before that -- so sending
+	// the two messages straight after connect would measure the accept race and
+	// pass for the wrong reason, holding 0 of 2 with the defect absent.
+	if _, err := Displays(ctxT(t)); err != nil {
+		t.Fatalf("Displays: %v", err)
+	}
+	cfg := f.config()
+	f.send(MsgConfig, EncodeConfig(cfg))
+	f.lendBuffer(cfg.Slots, cfg.SlotSize)
+
+	deadline := time.Now().Add(testBudget())
+	for len(s.replies) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the pump is holding %d of the handshake's 2 messages; the second "+
+				"was dropped and whoever asked for it would wait forever", len(s.replies))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := s.await(ctxT(t), MsgConfig); err != nil {
+		t.Fatalf("awaiting the config: %v", err)
+	}
+	r, err := s.await(ctxT(t), MsgBuffer)
+	if err != nil {
+		t.Fatalf("awaiting the buffer: %v", err)
+	}
+	if r.fd < 0 {
+		t.Fatal("the buffer arrived without its descriptor")
+	}
+	if err := closeFD(r.fd); err != nil {
+		t.Fatalf("closing the lent descriptor: %v", err)
+	}
+}
+
+// And a request must not be handed what an abandoned one left behind — two
+// messages now, not one, so the drain is a loop.
+func TestARequestDrainsAWholeAbandonedAnswer(t *testing.T) {
+	f := newFake(t)
+	s, err := connect()
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	// ⛔ ONE REAL ROUND TRIP FIRST. The fake only writes once it has ACCEPTED
+	// the connection, and its send is a silent no-op before that -- so sending
+	// the two messages straight after connect would measure the accept race and
+	// pass for the wrong reason, holding 0 of 2 with the defect absent.
+	if _, err := Displays(ctxT(t)); err != nil {
+		t.Fatalf("Displays: %v", err)
+	}
+	cfg := f.config()
+	f.send(MsgConfig, EncodeConfig(cfg))
+	f.lendBuffer(cfg.Slots, cfg.SlotSize)
+	deadline := time.Now().Add(testBudget())
+	for len(s.replies) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("the pump never held both halves")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// A fresh request must get the DISPLAY LIST it asked for, not the config
+	// left over from the handshake nobody collected.
+	body, err := s.request(ctxT(t), MsgListDisplays, nil, MsgDisplays)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	ds, err := DecodeDisplays(body)
+	if err != nil {
+		t.Fatalf("decoding the display list: %v", err)
+	}
+	if len(ds) == 0 {
+		t.Fatal("the display list came back empty")
+	}
+}

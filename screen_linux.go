@@ -35,7 +35,7 @@ func Screens(ctx context.Context) ([]Display, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: dialling the wall host on @%s: %w", ErrUnsupported, name, err)
 	}
-	s := &session{uc: uc, fc: newFDConn(uc), replies: make(chan reply, 1), done: make(chan struct{})}
+	s := &session{uc: uc, fc: newFDConn(uc), replies: make(chan reply, repliesDepth), done: make(chan struct{})}
 	go s.pump()
 	defer s.shutdown(ErrClosed)
 
@@ -82,7 +82,7 @@ var openScreen = func(ctx context.Context, d Display, o ScreenOptions) (screenFe
 	s := &session{
 		uc:      uc,
 		fc:      newFDConn(uc),
-		replies: make(chan reply, 1),
+		replies: make(chan reply, repliesDepth),
 		done:    make(chan struct{}),
 		// Sized to the largest queue a screen may ask for, so the pump never
 		// has to drop an acknowledgement: a dropped one loses its slot for the

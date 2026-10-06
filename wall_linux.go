@@ -48,7 +48,7 @@ func openOwnedDisplay(ctx context.Context, spec DisplaySpec) (feed, error) {
 	if err != nil {
 		return feed{}, fmt.Errorf("%w: dialling the wall host on @%s: %w", ErrUnsupported, name, err)
 	}
-	s := &session{uc: uc, fc: newFDConn(uc), replies: make(chan reply, 1), done: make(chan struct{})}
+	s := &session{uc: uc, fc: newFDConn(uc), replies: make(chan reply, repliesDepth), done: make(chan struct{})}
 	go s.pump()
 
 	st, id, err := s.openDisplay(ctx, spec)

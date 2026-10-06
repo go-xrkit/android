@@ -184,6 +184,19 @@ type reply struct {
 	fd   int
 }
 
+// repliesDepth is how many of the host's answers the pump may hold for a caller
+// that has not woken up yet.
+//
+// ⛔ IT IS NOT 1, AND THE DIFFERENCE IS A HANG. Every handshake in this package
+// is TWO messages — MsgConfig and then MsgBuffer — sent back to back by the
+// host, for a capture, an owned display and a screen alike. With room for one,
+// a pump that got both before the caller consumed the first dropped the second,
+// and the caller waited out its whole context for a buffer that was already
+// gone. Four leaves room for an answer and an error behind it, and [session.request]
+// empties the channel before it asks, so depth cannot carry a stale answer into
+// the next request.
+const repliesDepth = 4
+
 var (
 	sessMu   sync.Mutex
 	sessCur  *session
@@ -213,7 +226,7 @@ func connect() (*session, error) {
 		sessErr = fmt.Errorf("%w: dialling the host on @%s: %w", ErrUnsupported, name, err)
 		return nil, sessErr
 	}
-	s := &session{uc: uc, fc: newFDConn(uc), replies: make(chan reply, 1), done: make(chan struct{})}
+	s := &session{uc: uc, fc: newFDConn(uc), replies: make(chan reply, repliesDepth), done: make(chan struct{})}
 	go s.pump()
 	sessCur = s
 	return s, nil
@@ -295,6 +308,18 @@ func (s *session) pump() {
 			// A reply nobody is waiting for is dropped rather than queued: it
 			// belongs to a request whose context already expired, and keeping
 			// it would answer the NEXT request with the previous one's answer.
+			//
+			// ⛔ BUT THE CHANNEL HOLDS A WHOLE ANSWER, NOT ONE MESSAGE. Every
+			// handshake here is TWO messages — MsgConfig and then MsgBuffer,
+			// for a capture, an owned display and a screen alike — and the host
+			// sends them back to back. With room for one, a pump that read both
+			// before the caller woke DROPPED THE SECOND, and the caller then
+			// waited for a buffer that would never come again: a hang until its
+			// context expired, with nothing logged and nothing to see.
+			//
+			// It was found as a test failing about once in thirteen runs on one
+			// CPU, and it is not a test defect: a real host sends the same two
+			// messages back to back, so a loaded phone reaches it the same way.
 			select {
 			case s.replies <- reply{typ, body, fd}:
 			default:
@@ -367,14 +392,19 @@ func (s *session) send(typ uint8, body []byte) error {
 func (s *session) request(ctx context.Context, typ uint8, body []byte, want uint8) ([]byte, error) {
 	s.reqMu.Lock()
 	defer s.reqMu.Unlock()
-	// Drain an answer left over from an abandoned request, so this one is not
-	// handed the previous one's.
-	select {
-	case r := <-s.replies:
-		if r.fd >= 0 {
-			_ = closeFD(r.fd)
+	// Drain every answer left over from an abandoned request, so this one is
+	// not handed the previous one's. It is a LOOP rather than one take, because
+	// an abandoned handshake leaves two.
+	for {
+		select {
+		case r := <-s.replies:
+			if r.fd >= 0 {
+				_ = closeFD(r.fd)
+			}
+			continue
+		default:
 		}
-	default:
+		break
 	}
 	if err := s.send(typ, body); err != nil {
 		return nil, fmt.Errorf("android: sending 0x%02x: %w", typ, err)
