@@ -8,10 +8,12 @@ import android.app.Presentation;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
@@ -37,8 +39,27 @@ import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * The WALL host: displays this application creates and owns, each carrying a
- * Presentation of our own content, each read back through an ImageReader.
+ * The PRESENTATION host, in both directions.
+ *
+ * <p>Two things live here, and they are the same Android object pointed two
+ * ways:
+ *
+ * <ul>
+ *   <li>a <b>wall</b> panel — a display this application creates and owns,
+ *       carrying a Presentation of content the host builds, read back through
+ *       an ImageReader. The pixels come FROM Android, which is the whole
+ *       reason: a WebView, a MediaCodec surface, a PdfRenderer are things a
+ *       CGO-free Go process cannot render and an ordinary View can.
+ *   <li>a <b>screen</b> — a Presentation on a display that already exists, the
+ *       glasses on the USB-C port, carrying a Bitmap the application painted.
+ *       The pixels go TO Android, because a headset is an output and what
+ *       belongs on it is the ribbon the application composited.
+ * </ul>
+ *
+ * <p>They share this service because they are one window kind with one
+ * permission story — <b>none</b> — and splitting them would have been a third
+ * copy of the same socket plumbing. What differs is which display carries the
+ * Presentation and which way the pixels travel.
  *
  * <p>It is a second service rather than part of {@link XrHostService} because
  * the two have nothing in common but a wire format. Capture needs a
@@ -48,10 +69,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * "recording your screen" chip in the status bar, and a capture session ending
  * cannot take a panel with it.
  *
- * <p>It also serves <b>one connection per display</b>, where the capture host
- * serves exactly one connection in total. A display's lifetime is its socket's
- * lifetime, so closing one cannot disturb another's frames, and a client that
- * dies has its displays released by the kernel closing its sockets.
+ * <p>It also serves <b>one connection per panel or screen</b>, where the capture
+ * host serves exactly one connection in total. A Presentation's lifetime is its
+ * socket's lifetime, so closing one cannot disturb another's frames, and a
+ * client that dies has its windows released by the kernel closing its sockets.
  *
  * <h2>THE LIMIT IS THE SAFETY</h2>
  *
@@ -77,11 +98,15 @@ public final class XrWallService extends Service {
 
     // The wire, mirrored from protocol.go.
     private static final int MSG_CONFIG = 0x02, MSG_FRAME = 0x03, MSG_STOPPED = 0x04;
-    private static final int MSG_ERROR = 0x06, MSG_BUFFER = 0x07;
+    private static final int MSG_ERROR = 0x06, MSG_BUFFER = 0x07, MSG_PRESENTED = 0x08;
     private static final int MSG_OPEN_DISPLAY = 0x86, MSG_STOP = 0x84, MSG_BYE = 0x85;
+    private static final int MSG_OPEN_SCREEN = 0x87, MSG_PRESENT = 0x88;
+    private static final int MSG_DISPLAYS = 0x01, MSG_LIST_DISPLAYS = 0x81;
 
     private static final int STOP_SYSTEM = 1, STOP_APP = 2;
+    private static final int CODE_NOT_FOUND = 3;
     private static final int CODE_TOO_MANY_DISPLAYS = 5;
+    private static final int CODE_NOT_PRESENTABLE = 6;
 
     private static final int CONTENT_SENTINEL = 1, CONTENT_WEB = 2;
 
@@ -150,7 +175,7 @@ public final class XrWallService extends Service {
         }
     }
 
-    /** One connection, and therefore at most one owned display. */
+    /** One connection, and therefore at most one Presentation: a panel or a screen. */
     private final class Panel {
         private final LocalSocket sock;
         private DataOutputStream out;
@@ -165,6 +190,17 @@ public final class XrWallService extends Service {
         private volatile boolean streaming;
         private boolean counted;
         private final Object pixelLock = new Object();
+
+        /** The view a SCREEN paints into, and its bitmap. Null for a panel. */
+        private FrameView frameView;
+        private Bitmap bmp;
+        /**
+         * A screen's row stride, which is exactly frameW*4 and NOT the aligned
+         * one a panel announces. The alignment exists because a GPU writes a
+         * panel's surface; nothing writes a screen's buffer but the application,
+         * and Bitmap.copyPixelsFromBuffer takes tightly packed rows or nothing.
+         */
+        private int screenStride;
 
         Panel(LocalSocket s) {
             this.sock = s;
@@ -208,6 +244,15 @@ public final class XrWallService extends Service {
             switch (typ) {
                 case MSG_OPEN_DISPLAY:
                     handler.post(() -> open(body));
+                    break;
+                case MSG_LIST_DISPLAYS:
+                    handler.post(this::sendDisplays);
+                    break;
+                case MSG_OPEN_SCREEN:
+                    handler.post(() -> openScreen(body));
+                    break;
+                case MSG_PRESENT:
+                    handler.post(() -> present(body));
                     break;
                 case MSG_STOP:
                 case MSG_BYE:
@@ -317,6 +362,161 @@ public final class XrWallService extends Service {
 
         private String describe(int kind, String payload) {
             return (kind == CONTENT_WEB ? "web " : "sentinel ") + payload;
+        }
+
+        /**
+         * Answers what displays exist.
+         *
+         * <p>⛔ THE WALL HOST SERVES THIS TOO, and not for convenience: a
+         * display list needs no MediaProjection, no consent and no foreground
+         * service, so an application that only wants to paint on the glasses
+         * must not have to start the capture host to FIND them. It did have to,
+         * and the cost was the whole mediaProjection apparatus running for a
+         * feature that uses none of it.
+         */
+        private void sendDisplays() {
+            Display[] ds = getSystemService(DisplayManager.class).getDisplays();
+            Enc e = new Enc();
+            e.i32(ds.length);
+            for (Display d : ds) {
+                android.graphics.Point sz = new android.graphics.Point();
+                d.getRealSize(sz);
+                android.util.DisplayMetrics m = new android.util.DisplayMetrics();
+                d.getRealMetrics(m);
+                e.i32(d.getDisplayId());
+                e.str(d.getName());
+                e.i32(sz.x);
+                e.i32(sz.y);
+                e.i32(m.densityDpi);
+                e.i32(Math.round(d.getRefreshRate() * 1000f));
+                e.i32(d.getFlags());
+            }
+            send(MSG_DISPLAYS, e.bytes());
+        }
+
+        /**
+         * Shows a Presentation on a display that ALREADY EXISTS and lends the
+         * buffer the application will paint into.
+         *
+         * <p>Runs on the host's handler thread. Every Android object below
+         * belongs to it, including the Presentation's view hierarchy, which is
+         * why the frames are copied there too.
+         */
+        private void openScreen(byte[] body) {
+            Dec d = new Dec(body);
+            int displayId = d.i32(), w = d.i32(), h = d.i32(), wantSlots = d.i32();
+            if (w <= 0 || h <= 0 || wantSlots <= 0) {
+                error(0, "openScreen", "a " + w + "x" + h + " screen with " + wantSlots
+                        + " slots is not a screen");
+                return;
+            }
+
+            Display display = getSystemService(DisplayManager.class).getDisplay(displayId);
+            if (display == null) {
+                error(CODE_NOT_FOUND, "getDisplay", "there is no display " + displayId
+                        + " any more; it was probably unplugged");
+                return;
+            }
+            // The platform's own answer, asked again HERE rather than trusted
+            // from the display list the application read: a headset can be
+            // unplugged between the two, and this is the side that would throw.
+            if ((display.getFlags() & Display.FLAG_PRESENTATION) == 0) {
+                error(CODE_NOT_PRESENTABLE, "getDisplay", "display " + displayId + " \""
+                        + display.getName() + "\" has no FLAG_PRESENTATION, so the platform "
+                        + "will not take a presentation on it");
+                return;
+            }
+
+            frameW = w;
+            frameH = h;
+            slots = wantSlots;
+            screenStride = w * 4;
+            try {
+                bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            } catch (RuntimeException ex) {
+                error(0, "createBitmap", "a " + w + "x" + h + " bitmap: " + ex);
+                return;
+            }
+            frameView = new FrameView(createDisplayContext(display), bmp);
+            try {
+                Presentation p = new Presentation(XrWallService.this, display);
+                p.setContentView(frameView, new ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                p.getWindow().setBackgroundDrawable(new ColorDrawable(Color.BLACK));
+                p.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT);
+                p.show();
+                presentation = p;
+            } catch (Throwable t) {
+                error(0, "Presentation.show", String.valueOf(t));
+                return;
+            }
+            Log.i(TAG, "screen on display " + displayId + " \"" + display.getName() + "\" "
+                    + display.getMode().getPhysicalWidth() + "x"
+                    + display.getMode().getPhysicalHeight() + ", painted at " + w + "x" + h);
+
+            slotSize = (long) screenStride * (long) h;
+            Enc e = new Enc();
+            e.i32(w);
+            e.i32(h);
+            e.i32(screenStride);
+            e.i32(PixelFormat.RGBA_8888);
+            e.i32(slots);
+            e.i64(slotSize);
+            e.i32(displayId);
+            send(MSG_CONFIG, e.bytes());
+            lendBuffer();
+        }
+
+        /**
+         * Puts one slot of the shared buffer on the screen, then frees it.
+         *
+         * <p>The acknowledgement goes out after the COPY, not after the draw:
+         * the pixels are in the host's own bitmap by then and the application
+         * may have the slot back. Waiting for the compositor instead would pace
+         * the application against the panel's refresh with no buffering left,
+         * which is the stutter this queue exists to avoid.
+         */
+        private void present(byte[] body) {
+            Dec d = new Dec(body);
+            long n = d.i64();
+            int slot = d.i32(), w = d.i32(), h = d.i32(), stride = d.i32();
+            // Read ONCE into a local: release() runs on the socket thread and
+            // can null these while this runs on the handler thread.
+            FrameView view = frameView;
+            if (view == null) {
+                error(0, "present", "this connection is not a screen");
+                return;
+            }
+            // A slot number reaches us as an offset into shared memory, and a
+            // geometry that does not match the one announced would read past
+            // the slot. Both are refused rather than clamped: a clamp would
+            // show a torn frame and say nothing.
+            if (slot < 0 || slot >= slots || w != frameW || h != frameH || stride != screenStride) {
+                error(0, "present", "frame " + n + " says slot " + slot + " " + w + "x" + h
+                        + " stride " + stride + ", on a screen of " + slots + " slots of "
+                        + frameW + "x" + frameH + " stride " + screenStride);
+                return;
+            }
+            // The bitmap is recycled under this same lock, so holding it is what
+            // keeps a copy from running into a freed one.
+            synchronized (pixelLock) {
+                if (shared == null || bmp == null) {
+                    return;
+                }
+                shared.position((int) (slot * slotSize));
+                shared.limit((int) (slot * slotSize + slotSize));
+                try {
+                    bmp.copyPixelsFromBuffer(shared);
+                } finally {
+                    shared.limit(shared.capacity());
+                }
+            }
+            view.invalidate();
+            Enc e = new Enc();
+            e.i64(n);
+            e.i32(slot);
+            send(MSG_PRESENTED, e.bytes());
         }
 
         private void announceConfig(int displayId) {
@@ -449,8 +649,17 @@ public final class XrWallService extends Service {
                 reader.close();
                 reader = null;
             }
+            frameView = null;
             synchronized (pixelLock) {
                 shared = null;
+                if (bmp != null) {
+                    // Recycled rather than dropped: a screen's bitmap is a
+                    // whole framebuffer, and a ribbon opens and closes these as
+                    // the glasses come and go. Under the lock, because present()
+                    // runs on another thread and would copy into a freed one.
+                    bmp.recycle();
+                    bmp = null;
+                }
             }
             if (sm != null) {
                 sm.close();
@@ -538,6 +747,40 @@ public final class XrWallService extends Service {
      * buffer is the classic silent failure of this whole mechanism, and flat
      * quadrants of known colour are the only way to catch it.
      */
+    /**
+     * The view a SCREEN paints into: one bitmap, scaled to fill the display.
+     *
+     * <p>It is a plain View rather than an ImageView because an ImageView
+     * caches what it was handed and would have to be told the bitmap changed on
+     * every frame. Here the bitmap is written in place and {@code invalidate()}
+     * is the whole message.
+     *
+     * <p>FILTER_BITMAP is on: a ribbon composited at one size and shown at
+     * another is the normal case, and nearest-neighbour on text is unreadable.
+     */
+    static final class FrameView extends View {
+        private final Bitmap bmp;
+        private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+        private final Rect src = new Rect();
+        private final Rect dst = new Rect();
+
+        FrameView(Context c, Bitmap b) {
+            super(c);
+            this.bmp = b;
+            setBackgroundColor(Color.BLACK);
+            src.set(0, 0, b.getWidth(), b.getHeight());
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            if (bmp.isRecycled()) {
+                return;
+            }
+            dst.set(0, 0, getWidth(), getHeight());
+            canvas.drawBitmap(bmp, src, dst, paint);
+        }
+    }
+
     static final class SentinelView extends View {
         static final int BG = 0xFFFF0000;           // red
         static final int TOP_LEFT = 0xFF00FF00;     // green
@@ -638,6 +881,18 @@ public final class XrWallService extends Service {
             int v = ((b[n] & 0xff) << 24) | ((b[n + 1] & 0xff) << 16)
                     | ((b[n + 2] & 0xff) << 8) | (b[n + 3] & 0xff);
             n += 4;
+            return v;
+        }
+
+        long i64() {
+            if (n + 8 > b.length) {
+                return 0;
+            }
+            long v = 0;
+            for (int i = 0; i < 8; i++) {
+                v = (v << 8) | (b[n + i] & 0xffL);
+            }
+            n += 8;
             return v;
         }
 

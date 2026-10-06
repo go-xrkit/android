@@ -166,6 +166,11 @@ type session struct {
 	reqMu   sync.Mutex // one request in flight at a time
 	replies chan reply
 
+	// acks carries MsgPresented to the [Screen] this session serves, and is nil
+	// on a session that serves a capture or an owned display. It is buffered so
+	// the pump never blocks on a screen that has stopped collecting.
+	acks chan PresentedMessage
+
 	mu     sync.Mutex
 	stream *Stream
 	closed bool
@@ -268,14 +273,24 @@ func (s *session) pump() {
 		if typ == MsgBuffer {
 			fd = s.fc.claimFD()
 		}
-		switch typ {
-		case MsgFrame, MsgStopped:
+		switch {
+		case typ == MsgFrame, typ == MsgStopped && s.acks == nil:
 			s.mu.Lock()
 			st := s.stream
 			s.mu.Unlock()
 			if st != nil {
 				st.deliver(typ, body)
 			}
+		case typ == MsgPresented:
+			s.deliverAck(body)
+		case typ == MsgStopped:
+			// A screen's Presentation went away — the cable was pulled, or the
+			// host was killed. There is no stream to fail, and the session
+			// ending is what the screen is watching, so it is ended HERE with
+			// the host's own words rather than left to the socket closing and
+			// reporting "connection ended".
+			s.shutdown(stoppedError(body))
+			return
 		default:
 			// A reply nobody is waiting for is dropped rather than queued: it
 			// belongs to a request whose context already expired, and keeping
@@ -289,6 +304,39 @@ func (s *session) pump() {
 			}
 		}
 	}
+}
+
+// deliverAck routes one MsgPresented to the screen waiting for its slot.
+//
+// A body that will not decode ends the session rather than being ignored: an
+// acknowledgement names a slot, and a screen that stopped believing them stalls
+// on the next frame with nothing said.
+func (s *session) deliverAck(body []byte) {
+	a, err := DecodePresented(body)
+	if err != nil {
+		s.shutdown(err)
+		return
+	}
+	select {
+	case s.acks <- a:
+	default:
+		// The screen has stopped collecting, which happens only once it is
+		// closed. Dropping is then correct: nothing is waiting for the slot.
+	}
+}
+
+// stoppedError translates a MsgStopped body into the error the application
+// sees. It is shared by the two things that can be stopped — a capture and a
+// screen — so the user revoking a projection reads the same either way.
+func stoppedError(body []byte) error {
+	m, err := DecodeStopped(body)
+	if err != nil {
+		return err
+	}
+	if m.Reason == StopUser {
+		return fmt.Errorf("%w: %s", ErrPermissionDenied, m.String())
+	}
+	return errors.New("android: " + m.String())
 }
 
 func (s *session) shutdown(err error) {
@@ -385,6 +433,8 @@ func hostError(e ErrorMessage) error {
 		return fmt.Errorf("%w: %s", ErrNotCapturable, e.Detail)
 	case e.Code == codeTooManyDisplays:
 		return fmt.Errorf("%w: %s", ErrTooManyDisplays, e.Detail)
+	case e.Code == codeNotPresentable:
+		return fmt.Errorf("%w: %s", ErrNotPresentable, e.Detail)
 	}
 	return e
 }
@@ -397,6 +447,11 @@ const (
 	codeNotFound        = 3
 	codeNotCapturable   = 4
 	codeTooManyDisplays = 5
+	// codeNotPresentable is the host refusing a display for a Presentation. It
+	// answers the same question [checkPresentable] answers locally, and exists
+	// because the two can disagree: a headset unplugged between the display
+	// list and the request is gone on the host's side only.
+	codeNotPresentable = 6
 )
 
 // Displays returns every display the host can see.
@@ -619,16 +674,7 @@ func (st *Stream) mapBuffer(fd int) error {
 // deliver takes one host message on the pump goroutine.
 func (st *Stream) deliver(typ uint8, body []byte) {
 	if typ == MsgStopped {
-		s, err := DecodeStopped(body)
-		if err != nil {
-			st.fail(err)
-			return
-		}
-		if s.Reason == StopUser {
-			st.fail(fmt.Errorf("%w: %s", ErrPermissionDenied, s.String()))
-			return
-		}
-		st.fail(errors.New("android: " + s.String()))
+		st.fail(stoppedError(body))
 		return
 	}
 	f, err := DecodeFrame(body)

@@ -98,3 +98,81 @@ func TestArtifactDirRefusesAWorkTreeAndNothingElse(t *testing.T) {
 		}
 	})
 }
+
+// ⛔ A TRANSCRIPT LANDS WHERE run-as CAN READ IT. The app's private directory
+// is the one the host hands over as HOME, and the external one — which a whole
+// run was written to and lost — is hidden from the shell user. The rule is
+// measured here rather than trusted, in both directions.
+func TestSaveTranscriptWritesWhereTheHostSaysHomeIs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path, err := android.SaveTranscript("screen.txt", "RESULT ok\n")
+	if err != nil {
+		t.Fatalf("SaveTranscript: %v", err)
+	}
+	if got, want := filepath.Dir(path), home; !sameDir(t, got, want) {
+		t.Fatalf("the transcript landed in %q, want the host's HOME %q", got, want)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading it back: %v", err)
+	}
+	if string(b) != "RESULT ok\n" {
+		t.Fatalf("the transcript holds %q", b)
+	}
+	// It is the person's own text on their own device: nobody else's account
+	// has a reason to read it.
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if m := st.Mode().Perm(); m&0o077 != 0 {
+		t.Fatalf("the transcript is mode %04o, readable by other accounts", m)
+	}
+}
+
+func TestSaveTranscriptFallsBackToTheArtifactDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", "")
+	t.Setenv(android.ArtifactEnv, dir)
+	path, err := android.SaveTranscript("glasses.txt", "ok")
+	if err != nil {
+		t.Fatalf("SaveTranscript: %v", err)
+	}
+	if got := filepath.Dir(path); !sameDir(t, got, dir) {
+		t.Fatalf("the transcript landed in %q, want %q", got, dir)
+	}
+}
+
+// Off a device with no HOME, the fallback is ArtifactDir — which REFUSES inside
+// a work tree. A transcript must not get a pass the rule does not give.
+func TestSaveTranscriptRefusesAWorkTree(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatalf("making a work tree: %v", err)
+	}
+	t.Setenv("HOME", "")
+	t.Setenv(android.ArtifactEnv, dir)
+	if _, err := android.SaveTranscript("screen.txt", "ok"); !errors.Is(err, android.ErrInRepository) {
+		t.Fatalf("SaveTranscript inside a work tree = %v, want ErrInRepository", err)
+	}
+}
+
+func TestSaveTranscriptReportsADirectoryItCannotWriteTo(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "not-there")
+	t.Setenv("HOME", home)
+	if _, err := android.SaveTranscript("screen.txt", "ok"); err == nil {
+		t.Fatal("SaveTranscript reported success writing into a directory that is not there")
+	}
+}
+
+// sameDir compares two paths through EvalSymlinks: a temporary directory on
+// darwin is under /var, which is a symlink to /private/var, so the two
+// spellings are the same directory and a string comparison would fail on the
+// platform this runs on.
+func sameDir(t *testing.T, a, b string) bool {
+	t.Helper()
+	ra, _ := filepath.EvalSymlinks(a)
+	rb, _ := filepath.EvalSymlinks(b)
+	return ra == rb
+}

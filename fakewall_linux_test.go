@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -32,6 +33,11 @@ type fakeWall struct {
 	nextID int
 	max    int // the limit the HOST enforces, independently of any Wall
 	onOpen func(*fakePanel, OpenDisplayMessage) bool
+
+	displays  []Display
+	onScreen  func(*fakePanel, OpenScreenMessage) bool
+	onPresent func(*fakePanel, PresentMessage) bool
+	onList    func(*fakePanel) bool
 }
 
 // fakePanel is one connection, and therefore one owned display.
@@ -171,6 +177,43 @@ func (p *fakePanel) handle(typ uint8, body []byte) {
 			return
 		}
 		p.openDefault(m)
+	case MsgListDisplays:
+		p.w.mu.Lock()
+		ds, hook := p.w.displays, p.w.onList
+		p.w.mu.Unlock()
+		if hook != nil && hook(p) {
+			return
+		}
+		p.send(MsgDisplays, EncodeDisplays(ds))
+	case MsgOpenScreen:
+		m, err := DecodeOpenScreen(body)
+		if err != nil {
+			p.w.t.Errorf("decoding MsgOpenScreen: %v", err)
+			return
+		}
+		p.w.mu.Lock()
+		hook := p.w.onScreen
+		p.w.mu.Unlock()
+		if hook != nil && hook(p, m) {
+			return
+		}
+		p.openScreenDefault(m)
+	case MsgPresent:
+		m, err := DecodePresent(body)
+		if err != nil {
+			p.w.t.Errorf("decoding MsgPresent: %v", err)
+			return
+		}
+		p.w.mu.Lock()
+		hook := p.w.onPresent
+		p.w.mu.Unlock()
+		if hook != nil && !hook(p, m) {
+			// The acknowledgement is WITHHELD, which is the only way to reach
+			// the back-pressure: a host that always answers never fills the
+			// queue, so the wait a slow headset causes would go untested.
+			return
+		}
+		p.send(MsgPresented, EncodePresented(PresentedMessage{Seq: m.Seq, Slot: m.Slot}))
 	case MsgStop, MsgBye:
 		// Nothing to unwind in the fake; the connection closing is the release.
 	}
@@ -258,4 +301,97 @@ func (p *fakePanel) paintSentinel() FrameMsg {
 		Stride: cfg.Stride, AtUnixNano: int64(seq) * 1_000_000}
 	p.send(MsgFrame, EncodeFrame(m))
 	return m
+}
+
+// ---- screens: the same host, the other direction ------------------------
+
+// displays is what this host answers MsgListDisplays with. A test sets it to
+// put a pair of glasses on the far end.
+func (w *fakeWall) setDisplays(ds []Display) {
+	w.mu.Lock()
+	w.displays = ds
+	w.mu.Unlock()
+}
+
+// setOnScreen installs a hook that may answer MsgOpenScreen itself. Returning
+// false takes the default behaviour.
+func (w *fakeWall) setOnScreen(fn func(*fakePanel, OpenScreenMessage) bool) {
+	w.mu.Lock()
+	w.onScreen = fn
+	w.mu.Unlock()
+}
+
+// setOnPresent installs a hook called for every MsgPresent before the
+// acknowledgement. Returning false withholds the acknowledgement, which is how
+// a test reaches the back-pressure.
+func (w *fakeWall) setOnPresent(fn func(*fakePanel, PresentMessage) bool) {
+	w.mu.Lock()
+	w.onPresent = fn
+	w.mu.Unlock()
+}
+
+// openScreenDefault performs the handshake the Java host performs for a screen:
+// the geometry it will present at, then the buffer the application paints into.
+//
+// The stride is exactly Width*4, as the Java host's is: the alignment a panel
+// announces exists because a GPU writes that surface, and nothing writes this
+// one but the application.
+func (p *fakePanel) openScreenDefault(m OpenScreenMessage) {
+	stride := m.Width * 4
+	cfg := ConfigMessage{
+		Width:     m.Width,
+		Height:    m.Height,
+		Stride:    stride,
+		Format:    FormatRGBA,
+		Slots:     m.Slots,
+		SlotSize:  int64(stride) * int64(m.Height),
+		DisplayID: m.DisplayID,
+	}
+	p.mu.Lock()
+	p.cfg = cfg
+	p.mu.Unlock()
+	p.send(MsgConfig, EncodeConfig(cfg))
+	p.lendBuffer(cfg.Slots, cfg.SlotSize)
+}
+
+// pixelAt reads one pixel the application painted, as 0xRRGGBB. It is how a
+// test asserts that what reached the shared buffer is what was drawn — the
+// thing the live proof on a headset cannot check at all.
+func (p *fakePanel) pixelAt(slot, x, y int) uint32 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	i := int64(slot)*p.slotSz + int64(y)*int64(p.cfg.Stride) + int64(x)*4
+	return uint32(p.buf[i])<<16 | uint32(p.buf[i+1])<<8 | uint32(p.buf[i+2])
+}
+
+// setOnList installs a hook that may answer MsgListDisplays itself. Returning
+// false takes the default behaviour.
+func (w *fakeWall) setOnList(fn func(*fakePanel) bool) {
+	w.mu.Lock()
+	w.onList = fn
+	w.mu.Unlock()
+}
+
+// panel returns the one connection this host is serving, failing the test when
+// there is not exactly one. A test that reached for "the panel" while two were
+// open would otherwise measure whichever arrived first.
+func (w *fakeWall) panel(t testing.TB) *fakePanel {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		w.mu.Lock()
+		n := len(w.panels)
+		var p *fakePanel
+		if n == 1 {
+			p = w.panels[0]
+		}
+		w.mu.Unlock()
+		if p != nil {
+			return p
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the host is serving %d connections, want exactly 1", n)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
