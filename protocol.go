@@ -55,6 +55,14 @@ const (
 	// itself created with SharedMemory.create is writable by the host, so the
 	// host creates it and lends it here.
 	MsgBuffer uint8 = 0x07
+	// MsgPresented says one frame the application wrote has reached the view on
+	// an existing display, so its slot is free again.
+	//
+	// It is the ONLY back-pressure [Screen] has. The pixels travel the opposite
+	// way there — this process draws and the host blits — so nothing else stops
+	// the application overwriting a slot the host has not finished reading, and
+	// a tear in a headset is not a cosmetic defect.
+	MsgPresented uint8 = 0x08
 
 	// MsgListDisplays asks the host what displays exist.
 	MsgListDisplays uint8 = 0x81
@@ -74,6 +82,20 @@ const (
 	// carries the id the platform assigned — and then MsgBuffer, exactly as
 	// MsgStart does, so one Stream implementation serves both.
 	MsgOpenDisplay uint8 = 0x86
+	// MsgOpenScreen asks the host to show a Presentation on a display that
+	// ALREADY EXISTS — the glasses — carrying a view this process paints into.
+	//
+	// It is the mirror image of MsgOpenDisplay, and the difference is the
+	// direction of the pixels, not the kind of window. MsgOpenDisplay exists to
+	// get at what Android can render and a CGO-free Go process cannot; this
+	// exists because the headset is an OUTPUT, and what belongs on it is the
+	// ribbon this process composited. The host answers with MsgConfig and then
+	// MsgBuffer, exactly as the other two do.
+	MsgOpenScreen uint8 = 0x87
+	// MsgPresent says the application has finished drawing one slot and the
+	// host should put it on the screen. It carries no pixels: the pixels are
+	// already in the shared buffer.
+	MsgPresent uint8 = 0x88
 )
 
 // Reasons a capture stopped, carried by [StoppedMessage].
@@ -626,4 +648,102 @@ func indexByte(s string, c byte) int {
 		}
 	}
 	return -1
+}
+
+// OpenScreenMessage asks the host for a Presentation on a display that already
+// exists, and for the shared buffer this process will paint into.
+type OpenScreenMessage struct {
+	// DisplayID is the android.view.Display id to present on. It must be a
+	// display the host can see and whose FLAG_PRESENTATION is set; the host
+	// refuses anything else rather than guessing.
+	DisplayID int
+	// Width and Height are the size of the frames this process will write, in
+	// pixels. They need not match the display: the host scales the bitmap to
+	// fill it, which is how a ribbon rendered at one resolution reaches panels
+	// of another.
+	Width, Height int
+	// Slots is how many frame slots the shared buffer holds.
+	Slots int
+}
+
+// EncodeOpenScreen encodes an [OpenScreenMessage].
+func EncodeOpenScreen(m OpenScreenMessage) []byte {
+	b := appendInt32(nil, m.DisplayID)
+	b = appendInt32(b, m.Width)
+	b = appendInt32(b, m.Height)
+	return appendInt32(b, m.Slots)
+}
+
+// DecodeOpenScreen decodes an [OpenScreenMessage].
+func DecodeOpenScreen(b []byte) (OpenScreenMessage, error) {
+	if len(b) < 16 {
+		return OpenScreenMessage{}, fmt.Errorf("%w: open-screen is %d bytes, want 16",
+			ErrShortPayload, len(b))
+	}
+	return OpenScreenMessage{
+		DisplayID: int32At(b, 0),
+		Width:     int32At(b, 4),
+		Height:    int32At(b, 8),
+		Slots:     int32At(b, 12),
+	}, nil
+}
+
+// PresentMessage hands one slot of the shared buffer to the host to put on the
+// screen. The geometry travels with it rather than being implied by the config,
+// for the same reason [FrameMsg] carries it: the one place a wrong number would
+// become an out-of-range slice over shared memory is the place to state it
+// explicitly and check it.
+type PresentMessage struct {
+	// Seq numbers the frame, from 1. It comes back in [PresentedMessage].
+	Seq int64
+	// Slot is which slot of the shared buffer holds the pixels.
+	Slot int
+	// Width, Height and Stride describe the pixels in that slot.
+	Width, Height, Stride int
+}
+
+// EncodePresent encodes a [PresentMessage].
+func EncodePresent(m PresentMessage) []byte {
+	b := binary.BigEndian.AppendUint64(nil, uint64(m.Seq))
+	b = appendInt32(b, m.Slot)
+	b = appendInt32(b, m.Width)
+	b = appendInt32(b, m.Height)
+	return appendInt32(b, m.Stride)
+}
+
+// DecodePresent decodes a [PresentMessage].
+func DecodePresent(b []byte) (PresentMessage, error) {
+	if len(b) < 24 {
+		return PresentMessage{}, fmt.Errorf("%w: present is %d bytes, want 24",
+			ErrShortPayload, len(b))
+	}
+	return PresentMessage{
+		Seq:    int64(binary.BigEndian.Uint64(b)),
+		Slot:   int32At(b, 8),
+		Width:  int32At(b, 12),
+		Height: int32At(b, 16),
+		Stride: int32At(b, 20),
+	}, nil
+}
+
+// PresentedMessage says one frame reached the screen and its slot is free.
+type PresentedMessage struct {
+	// Seq is the [PresentMessage.Seq] of the frame that was presented.
+	Seq int64
+	// Slot is the slot it occupied, which the application may now draw into.
+	Slot int
+}
+
+// EncodePresented encodes a [PresentedMessage].
+func EncodePresented(m PresentedMessage) []byte {
+	return appendInt32(binary.BigEndian.AppendUint64(nil, uint64(m.Seq)), m.Slot)
+}
+
+// DecodePresented decodes a [PresentedMessage].
+func DecodePresented(b []byte) (PresentedMessage, error) {
+	if len(b) < 12 {
+		return PresentedMessage{}, fmt.Errorf("%w: presented is %d bytes, want 12",
+			ErrShortPayload, len(b))
+	}
+	return PresentedMessage{Seq: int64(binary.BigEndian.Uint64(b)), Slot: int32At(b, 8)}, nil
 }

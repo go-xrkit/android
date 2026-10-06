@@ -31,7 +31,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -123,25 +122,15 @@ func describe(d android.Display) string {
 // ⛔ THE PATH IS SAID OUT LOUD, because a file nobody can name is a file nobody
 // will find -- and the whole point of writing it is that the person who needs
 // it was not watching when it was written.
-// ⛔ THE APP'S OWN files DIRECTORY, NOT ITS EXTERNAL ONE. A transcript in
-// /storage/emulated/0/Android/data/<pkg>/ is hidden from the shell user on a
-// modern Android and `adb shell run-as` cannot traverse the FUSE layer that
-// mediates it: a whole run was measured, written there, and unreadable. The
-// private directory -- which the host hands over as HOME -- is what run-as can
-// read, and this is a transcript rather than a capture, so android.ArtifactDir's
-// rule about never writing pixels inside a work tree does not govern it.
+// ⛔ IT IS android.SaveTranscript RATHER THAN A COPY HERE, because a second
+// command needed the same thing and a third one followed. WHERE a transcript
+// lands on a device is a rule with a reason -- the app's own files directory,
+// not its external one, which `adb shell run-as` cannot reach -- and a rule
+// kept in three places is how one of them stops being kept.
 func save(text string, say func(string, ...any)) {
-	dir := os.Getenv("HOME")
-	if dir == "" {
-		var err error
-		if dir, err = android.ArtifactDir(); err != nil {
-			say("⚠ no place to write the transcript: %v", err)
-			return
-		}
-	}
-	path := filepath.Join(dir, "glasses.txt")
-	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
-		say("⚠ the transcript could not be saved to %s: %v", path, err)
+	path, err := android.SaveTranscript("glasses.txt", text)
+	if err != nil {
+		say("⚠ the transcript could not be saved: %v", err)
 		return
 	}
 	fmt.Printf("ARTIFACT %s\n", path)

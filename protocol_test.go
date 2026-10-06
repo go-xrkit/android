@@ -369,3 +369,69 @@ func TestMessageIdsDoNotCollide(t *testing.T) {
 		}
 	}
 }
+
+func TestScreenMessagesSurviveARoundTrip(t *testing.T) {
+	open := OpenScreenMessage{DisplayID: 12, Width: 1920, Height: 1080, Slots: 3}
+	gotOpen, err := DecodeOpenScreen(EncodeOpenScreen(open))
+	if err != nil {
+		t.Fatalf("DecodeOpenScreen: %v", err)
+	}
+	if gotOpen != open {
+		t.Fatalf("open-screen round-tripped to %+v, want %+v", gotOpen, open)
+	}
+
+	pres := PresentMessage{Seq: 1 << 40, Slot: 2, Width: 1920, Height: 1080, Stride: 7680}
+	gotPres, err := DecodePresent(EncodePresent(pres))
+	if err != nil {
+		t.Fatalf("DecodePresent: %v", err)
+	}
+	if gotPres != pres {
+		t.Fatalf("present round-tripped to %+v, want %+v", gotPres, pres)
+	}
+
+	ack := PresentedMessage{Seq: 1 << 40, Slot: 2}
+	gotAck, err := DecodePresented(EncodePresented(ack))
+	if err != nil {
+		t.Fatalf("DecodePresented: %v", err)
+	}
+	if gotAck != ack {
+		t.Fatalf("presented round-tripped to %+v, want %+v", gotAck, ack)
+	}
+}
+
+// A body one byte short of every screen message. The host is a separate
+// process: a truncated body is a desynchronised stream, and reading past it
+// would decode the NEXT message's bytes as this one's geometry.
+func TestScreenMessagesRefuseABodyThatIsTooShort(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		body []byte
+		call func([]byte) error
+	}{
+		{"open-screen", make([]byte, 15), func(b []byte) error { _, err := DecodeOpenScreen(b); return err }},
+		{"present", make([]byte, 23), func(b []byte) error { _, err := DecodePresent(b); return err }},
+		{"presented", make([]byte, 11), func(b []byte) error { _, err := DecodePresented(b); return err }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if err := c.call(c.body); !errors.Is(err, ErrShortPayload) {
+				t.Fatalf("decoding %d bytes reported %v, want ErrShortPayload", len(c.body), err)
+			}
+		})
+	}
+}
+
+// ⛔ HOST→APP BELOW 0x80, APP→HOST AT OR ABOVE IT. A new message on the wrong
+// side of that line would be a plausible other message rather than a decode
+// error, which is the one failure this numbering exists to prevent.
+func TestTheScreenMessagesAreNumberedOnTheRightSide(t *testing.T) {
+	for name, typ := range map[string]uint8{"MsgPresented": MsgPresented} {
+		if typ >= 0x80 {
+			t.Fatalf("%s is %#02x, which is the app→host range", name, typ)
+		}
+	}
+	for name, typ := range map[string]uint8{"MsgOpenScreen": MsgOpenScreen, "MsgPresent": MsgPresent} {
+		if typ < 0x80 {
+			t.Fatalf("%s is %#02x, which is the host→app range", name, typ)
+		}
+	}
+}

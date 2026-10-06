@@ -8,7 +8,9 @@
 [![license](https://img.shields.io/badge/license-BSD--3--Clause-blue)](LICENSE)
 
 Screen capture on Android from **pure Go**, `CGO_ENABLED=0`, for an XR
-compositor that redraws every frame.
+compositor that redraws every frame — and the two things around it that a
+virtual desktop needs: **displays this application makes** ([`Wall`](#the-go-api-for-owned-displays)),
+and **the glasses, painted from Go** ([`Screen`](#painting-on-the-glasses-from-go)).
 
 ```go
 if !android.Authorized() {
@@ -577,6 +579,100 @@ this emulator); for an external sink it comes from the EDID. **No Android
 artifact for any real headset exists here** — see below, and please read that
 section before believing anything about a specific model.
 
+## Painting on the glasses from Go
+
+Everything above is about pixels coming **from** Android. This is the other
+direction, and it is what a headset is actually for: the glasses are an
+**output**, and what belongs on them is the ribbon the application composited.
+
+```go
+ds, err := android.Screens(ctx)          // the displays that will take a presentation
+scr, err := android.ShowOn(ctx, ds[0], android.ScreenOptions{})
+defer scr.Close()
+
+for {
+    c, err := scr.Next(ctx)              // a slot to draw into, waiting if all are in flight
+    draw.Draw(c.RGBA(), c.RGBA().Bounds(), src, image.Point{}, draw.Src)
+    err = scr.Present(ctx, c)            // hand it over; the slot comes back on the ack
+}
+```
+
+`Screens` asks the **wall** host, not the capture host, and that is the
+difference between needing a `MediaProjection` and needing nothing at all. An
+application that only wants to paint on the glasses would otherwise have had to
+start the whole projection apparatus — a foreground service, a consent dialog, a
+"recording your screen" chip in the status bar — to find out that a pair of
+glasses is plugged in.
+
+It keeps only displays the platform flagged **and** that are not the built-in
+panel. The flag alone is not the answer: some devices set `FLAG_PRESENTATION` on
+the default display, and an application that believed it would ask for a window
+over the launcher and be refused by a check it had already passed.
+
+### The back-pressure is the point
+
+`Next` hands out a slot, `Present` gives it to the host, and the slot comes back
+only once the host says the frame reached the view. Nothing else paces the
+application: the pixels go the other way here, so there is no stream of host
+frames to wait on, and overwriting a slot mid-blit is a tear in a headset.
+
+`ScreenOptions.QueueDepth` is how many slots there are, bounded by the same
+`MinQueueDepth`..`MaxQueueDepth` as a capture. `Screen.Stats().Waited` counts the
+times the application was faster than the glasses.
+
+A canvas is valid **from the `Next` that returned it until the `Present` that
+hands it back**, and presenting one twice is refused — including in the window
+before the acknowledgement arrives, which is most of the time and is exactly
+when a second `Present` gets made by mistake.
+
+### The host's stride, not the frame's width
+
+`Canvas.Stride` is the distance between two rows and is what the host announced.
+`Canvas.RGBA()` hands back an `image.RGBA` over the **same memory**, so the whole
+of `image/draw` paints a frame with no copy; `Canvas.Row(y)` gives one row's
+bytes to a compositor that writes spans, with its capacity stopping at the row so
+a span cannot run into the padding and corrupt the next one.
+
+### ⛔ What an acknowledgement is, and what it is not
+
+`cmd/xrscreen` reports how many frames the host took. That number separates "the
+mechanism works" from "the mechanism runs and shows black", which is this
+feature's silent failure — and it is worth having for exactly that. On a
+**Pixel 11 Pro Fold** with **VITURE Beast** glasses:
+
+```
+TARGET display 13 "VITURE Beast" 1920x1080 @110dpi 60Hz (presentation)
+SCREEN screen on display 13, 1920x1080, 7680-byte rows, 0 presented, 0 acknowledged, 0 waits
+PAINTED 3600 frames of 1920x1080 in 2m0s, 30.0 fps
+STATS 3600 presented, 3600 acknowledged, 0 waits
+```
+
+**Zero waits over two minutes.** The host stayed ahead of the application
+throughout — 248 MB/s of copies through the shared buffer — so the queue depth
+was never the thing limiting the frame rate. The display id is 13 here and 12 in
+an earlier run: ids are per attachment and are good for logs and
+`dumpsys display`, nothing more.
+
+**It does not say a photon left the panel.** There is nothing to read back: an
+ordinary application may not capture a display it does not own, so unlike
+`cmd/xrwide` and `cmd/xrwall` there is no pixel to sample. The glasses are the
+only instrument and the person wearing them is the only witness, which is why
+what gets drawn is deliberately unmistakable — flat quadrants of known colour
+with a bar sweeping across — so that one glance settles the rest.
+
+```sh
+APP=./cmd/xrscreen host/build.sh && adb install -r host/out/xrhost.apk
+adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity \
+    --ez capture false --es args '-wait 20m -frames 3600 -fps 30 -hold 60s'
+# unplug the cable, attach the glasses, look
+adb shell run-as org.goxrkit.androidhost cat files/screen.txt
+```
+
+It **waits** for a display rather than asking once, because the phone has one
+USB-C port and the glasses want all of it: the command is started over the cable
+that then has to be moved. A command that read the display list at startup could
+only ever report the phone's own panel.
+
 ## Input
 
 Nothing new is needed, and that is the finding rather than an omission. A
@@ -817,16 +913,35 @@ is a probe nobody runs twice.
 
 ### Hardware connected and exercised
 
-**None.** No XR glasses were attached to an Android device for any of this. That
-is the honest headline and it should be read before anything else here.
+A **Pixel 11 Pro Fold**, Android 17 (API 37, arm64), with **VITURE Beast**
+glasses on its USB-C port. What that device answered, and nothing more:
 
-Everything above was measured on the **Android emulator**, API level 35
+- the glasses are an ordinary Android display —
+  `id 12 "VITURE Beast" 1920x1080 @110dpi 60.0Hz flags 0x8088 presentation true`,
+  named from the sink's own EDID;
+- owned displays go to **32768×1080**, with 0 wrong and 0 black pixels over
+  35 389 440 sampled — see [`cmd/xrwide`](cmd/xrwide);
+- `startForeground` with `mediaProjection` and no consent **kills the process**
+  on API 37, which is why the host only goes foreground once consent exists;
+- and the glasses take a `Presentation` carrying pixels Go painted —
+  [`cmd/xrscreen`](cmd/xrscreen), **3600 frames of 1920×1080 in 2m0s at 30.0 fps,
+  3600 acknowledged, 0 waits.** The queue never emptied: 248 MB/s of copies
+  through the shared buffer without once making the application wait for a slot.
+
+```
+TARGET display 13 "VITURE Beast" 1920x1080 @110dpi 60Hz (presentation)
+PAINTED 3600 frames of 1920x1080 in 2m0s, 30.0 fps
+STATS 3600 presented, 3600 acknowledged, 0 waits
+```
+
+Everything *else* below was measured on the **Android emulator**, API level 35
 (Android 15), `system-images/android-35/default/arm64-v8a`, running on an Apple
 Silicon Mac — fingerprint
 `Android/sdk_phone64_arm64/emu64a:15/AE3A.240806.019/12368160:userdebug/test-keys`,
 1080×2400 at 420 dpi. A real arm64 Android system, a real MediaProjection, a
-real `SharedMemory`, a real socket, real frames. It is not a real phone, and it is
-certainly not a phone with glasses on its USB-C port.
+real `SharedMemory`, a real socket, real frames. It is not a real phone — and
+where a figure below comes from the emulator rather than from the Fold, it says
+so.
 
 ### Partially observed
 
@@ -868,16 +983,21 @@ in yourself and tell us what `adb shell dumpsys display` said.
 
 Deliberate, and stated rather than hidden:
 
-- **no real device, and no real glasses** — see above;
+- **most of the capture figures are still the emulator's** — the Fold answered
+  the display, wide-display and API 37 questions; the frame rates, the ceiling
+  of 304 and the consent flow were not re-measured on it, and the section above
+  says which is which;
 - **capture of a second display is impossible** for an unprivileged app and is
   reported as `ErrNotCapturable` rather than attempted. `MediaProjection`
   mirrors the default display; anything else needs `CAPTURE_VIDEO_OUTPUT`,
   which is `signature`;
-- **`Presentation` on a display the glasses provide is still not wired in.**
-  [`Wall`](#the-go-api-for-owned-displays) covers displays the application
-  MAKES. Drawing on a display it was GIVEN — the one the glasses are — is the
-  widget back-end's job, and what this repository contributes there is only the
-  measured fact that the route exists;
+- **nobody has read a pixel back off the glasses, and nobody can.** An ordinary
+  application may not capture a display it does not own, so
+  [`Screen`](#painting-on-the-glasses-from-go) can report how many frames the
+  host took and nothing more. The transport is measured end to end against a
+  real socket and a real shared mapping — what the application draws is asserted
+  to be the bytes the host finds — but between the host's bitmap and the panel
+  there is only a person looking;
 - **only two `Content` kinds exist.** `Web` and `Sentinel`. `MediaCodec`,
   `PdfRenderer` and a maps view are the obvious next ones and none is written;
 - **the limit is 32 by construction, not by measurement on hardware.** It is

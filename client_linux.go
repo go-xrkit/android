@@ -166,6 +166,11 @@ type session struct {
 	reqMu   sync.Mutex // one request in flight at a time
 	replies chan reply
 
+	// acks carries MsgPresented to the [Screen] this session serves, and is nil
+	// on a session that serves a capture or an owned display. It is buffered so
+	// the pump never blocks on a screen that has stopped collecting.
+	acks chan PresentedMessage
+
 	mu     sync.Mutex
 	stream *Stream
 	closed bool
@@ -178,6 +183,19 @@ type reply struct {
 	body []byte
 	fd   int
 }
+
+// repliesDepth is how many of the host's answers the pump may hold for a caller
+// that has not woken up yet.
+//
+// ⛔ IT IS NOT 1, AND THE DIFFERENCE IS A HANG. Every handshake in this package
+// is TWO messages — MsgConfig and then MsgBuffer — sent back to back by the
+// host, for a capture, an owned display and a screen alike. With room for one,
+// a pump that got both before the caller consumed the first dropped the second,
+// and the caller waited out its whole context for a buffer that was already
+// gone. Four leaves room for an answer and an error behind it, and [session.request]
+// empties the channel before it asks, so depth cannot carry a stale answer into
+// the next request.
+const repliesDepth = 4
 
 var (
 	sessMu   sync.Mutex
@@ -208,7 +226,7 @@ func connect() (*session, error) {
 		sessErr = fmt.Errorf("%w: dialling the host on @%s: %w", ErrUnsupported, name, err)
 		return nil, sessErr
 	}
-	s := &session{uc: uc, fc: newFDConn(uc), replies: make(chan reply, 1), done: make(chan struct{})}
+	s := &session{uc: uc, fc: newFDConn(uc), replies: make(chan reply, repliesDepth), done: make(chan struct{})}
 	go s.pump()
 	sessCur = s
 	return s, nil
@@ -268,18 +286,40 @@ func (s *session) pump() {
 		if typ == MsgBuffer {
 			fd = s.fc.claimFD()
 		}
-		switch typ {
-		case MsgFrame, MsgStopped:
+		switch {
+		case typ == MsgFrame, typ == MsgStopped && s.acks == nil:
 			s.mu.Lock()
 			st := s.stream
 			s.mu.Unlock()
 			if st != nil {
 				st.deliver(typ, body)
 			}
+		case typ == MsgPresented:
+			s.deliverAck(body)
+		case typ == MsgStopped:
+			// A screen's Presentation went away — the cable was pulled, or the
+			// host was killed. There is no stream to fail, and the session
+			// ending is what the screen is watching, so it is ended HERE with
+			// the host's own words rather than left to the socket closing and
+			// reporting "connection ended".
+			s.shutdown(stoppedError(body))
+			return
 		default:
 			// A reply nobody is waiting for is dropped rather than queued: it
 			// belongs to a request whose context already expired, and keeping
 			// it would answer the NEXT request with the previous one's answer.
+			//
+			// ⛔ BUT THE CHANNEL HOLDS A WHOLE ANSWER, NOT ONE MESSAGE. Every
+			// handshake here is TWO messages — MsgConfig and then MsgBuffer,
+			// for a capture, an owned display and a screen alike — and the host
+			// sends them back to back. With room for one, a pump that read both
+			// before the caller woke DROPPED THE SECOND, and the caller then
+			// waited for a buffer that would never come again: a hang until its
+			// context expired, with nothing logged and nothing to see.
+			//
+			// It was found as a test failing about once in thirteen runs on one
+			// CPU, and it is not a test defect: a real host sends the same two
+			// messages back to back, so a loaded phone reaches it the same way.
 			select {
 			case s.replies <- reply{typ, body, fd}:
 			default:
@@ -289,6 +329,39 @@ func (s *session) pump() {
 			}
 		}
 	}
+}
+
+// deliverAck routes one MsgPresented to the screen waiting for its slot.
+//
+// A body that will not decode ends the session rather than being ignored: an
+// acknowledgement names a slot, and a screen that stopped believing them stalls
+// on the next frame with nothing said.
+func (s *session) deliverAck(body []byte) {
+	a, err := DecodePresented(body)
+	if err != nil {
+		s.shutdown(err)
+		return
+	}
+	select {
+	case s.acks <- a:
+	default:
+		// The screen has stopped collecting, which happens only once it is
+		// closed. Dropping is then correct: nothing is waiting for the slot.
+	}
+}
+
+// stoppedError translates a MsgStopped body into the error the application
+// sees. It is shared by the two things that can be stopped — a capture and a
+// screen — so the user revoking a projection reads the same either way.
+func stoppedError(body []byte) error {
+	m, err := DecodeStopped(body)
+	if err != nil {
+		return err
+	}
+	if m.Reason == StopUser {
+		return fmt.Errorf("%w: %s", ErrPermissionDenied, m.String())
+	}
+	return errors.New("android: " + m.String())
 }
 
 func (s *session) shutdown(err error) {
@@ -319,14 +392,19 @@ func (s *session) send(typ uint8, body []byte) error {
 func (s *session) request(ctx context.Context, typ uint8, body []byte, want uint8) ([]byte, error) {
 	s.reqMu.Lock()
 	defer s.reqMu.Unlock()
-	// Drain an answer left over from an abandoned request, so this one is not
-	// handed the previous one's.
-	select {
-	case r := <-s.replies:
-		if r.fd >= 0 {
-			_ = closeFD(r.fd)
+	// Drain every answer left over from an abandoned request, so this one is
+	// not handed the previous one's. It is a LOOP rather than one take, because
+	// an abandoned handshake leaves two.
+	for {
+		select {
+		case r := <-s.replies:
+			if r.fd >= 0 {
+				_ = closeFD(r.fd)
+			}
+			continue
+		default:
 		}
-	default:
+		break
 	}
 	if err := s.send(typ, body); err != nil {
 		return nil, fmt.Errorf("android: sending 0x%02x: %w", typ, err)
@@ -385,6 +463,8 @@ func hostError(e ErrorMessage) error {
 		return fmt.Errorf("%w: %s", ErrNotCapturable, e.Detail)
 	case e.Code == codeTooManyDisplays:
 		return fmt.Errorf("%w: %s", ErrTooManyDisplays, e.Detail)
+	case e.Code == codeNotPresentable:
+		return fmt.Errorf("%w: %s", ErrNotPresentable, e.Detail)
 	}
 	return e
 }
@@ -397,6 +477,11 @@ const (
 	codeNotFound        = 3
 	codeNotCapturable   = 4
 	codeTooManyDisplays = 5
+	// codeNotPresentable is the host refusing a display for a Presentation. It
+	// answers the same question [checkPresentable] answers locally, and exists
+	// because the two can disagree: a headset unplugged between the display
+	// list and the request is gone on the host's side only.
+	codeNotPresentable = 6
 )
 
 // Displays returns every display the host can see.
@@ -619,16 +704,7 @@ func (st *Stream) mapBuffer(fd int) error {
 // deliver takes one host message on the pump goroutine.
 func (st *Stream) deliver(typ uint8, body []byte) {
 	if typ == MsgStopped {
-		s, err := DecodeStopped(body)
-		if err != nil {
-			st.fail(err)
-			return
-		}
-		if s.Reason == StopUser {
-			st.fail(fmt.Errorf("%w: %s", ErrPermissionDenied, s.String()))
-			return
-		}
-		st.fail(errors.New("android: " + s.String()))
+		st.fail(stoppedError(body))
 		return
 	}
 	f, err := DecodeFrame(body)
