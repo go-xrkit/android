@@ -41,13 +41,18 @@ public final class XrDemoActivity extends Activity {
         // because nothing can refuse it.
         startService(new Intent(this, XrWallService.class));
 
-        // The capture host is a mediaProjection foreground service, and the
-        // platform KILLS THE WHOLE PROCESS if it is started without the
-        // project_media app-op -- taking the wall host with it. So an
-        // application that only wants owned displays says so and never touches
-        // it: `am start ... --ez capture false`.
+        // ⛔ startService, NOT startForegroundService. The capture host only
+        // becomes a mediaProjection foreground service once consent exists --
+        // see XrHostService.onStartCommand, and the Android 17 enforcement that
+        // kills the whole process otherwise. startForegroundService would
+        // promise a startForeground within five seconds that the host must not
+        // make yet, and break the thing it is trying to protect.
+        //
+        // It is still started here, and unconditionally when capture is wanted,
+        // because the display list and the consent request both travel over its
+        // socket and neither needs any projection at all.
         if (getIntent().getBooleanExtra("capture", true)) {
-            startForegroundService(new Intent(this, XrHostService.class));
+            startService(new Intent(this, XrHostService.class));
         }
         try {
             spawn();

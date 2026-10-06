@@ -272,34 +272,6 @@ func save(d *android.OwnedDisplay) {
 	fmt.Printf("ARTIFACT %s\n", path)
 }
 
-// ErrInRepository is reported when the chosen artefact directory is inside a
-// git work tree.
-var errInRepository = errors.New("a capture must never be written where it can be committed")
-
-func artifactDir() (string, error) {
-	dir := os.Getenv("XRKIT_ARTIFACT_DIR")
-	if dir == "" {
-		// On a device the host sets the working directory to the app's external
-		// files directory, which is inside no repository and survives the run.
-		wd, err := os.Getwd()
-		if err != nil {
-			return "", err
-		}
-		dir = wd
-	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return "", err
-	}
-	for d := abs; ; {
-		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
-			return "", fmt.Errorf("%w: %s is inside the work tree at %s", errInRepository, abs, d)
-		}
-		parent := filepath.Dir(d)
-		if parent == d {
-			break
-		}
-		d = parent
-	}
-	return abs, os.MkdirAll(abs, 0o755)
-}
+// artifactDir is the package's, shared with every other command: the rule that
+// refuses a git work tree must exist once.
+func artifactDir() (string, error) { return android.ArtifactDir() }

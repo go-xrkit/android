@@ -22,7 +22,21 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- GW_PERMISSIONS -->
 
-    <application android:label="go-xrkit" android:hasCode="true">
+    <!-- ⛔ DEBUGGABLE, BECAUSE AN ARTEFACT NOBODY CAN READ IS NOT AN ARTEFACT.
+         The commands here write their verdict to the app's external files
+         directory so that it survives a run nobody could watch: the phone has
+         ONE USB-C port, and attaching the glasses takes the cable adb was
+         using. Modern Android hides /storage/emulated/0/Android/data/<pkg>/
+         from the shell user, and `adb shell run-as` is refused outright for a
+         package that is not debuggable -
+
+             run-as: package not debuggable: org.goxrkit.androidhost
+
+         so a whole run was measured, written down, and unreadable, with the
+         logcat ring buffer long since rotated. This is a diagnostic host that
+         exists to be read from a cable; it is not shipped to anybody. -->
+    <application android:label="go-xrkit" android:hasCode="true"
+                 android:debuggable="true">
         <activity android:name="org.goxrkit.android.XrDemoActivity"
                   android:exported="true"
                   android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode">
