@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -122,11 +123,32 @@ func TestSaveTranscriptWritesWhereTheHostSaysHomeIs(t *testing.T) {
 	}
 	// It is the person's own text on their own device: nobody else's account
 	// has a reason to read it.
+	//
+	// ⛔ NOT ON WINDOWS, AND THE REASON IS NOT THAT IT IS AWKWARD THERE. Windows
+	// has no POSIX permission bits: os.WriteFile's mode is dropped and the file
+	// comes back 0666, so the assertion would be measuring the platform rather
+	// than this package. The guarantee is about an Android device's
+	// per-application directory, and the Windows lane exists to prove the
+	// package still BUILDS where there is no host at all -- it has no such
+	// directory to make a claim about.
+	//
+	// It is a BRANCH rather than a skip, and the other side asserts the
+	// premise: the day Windows does honour the mode, this says so instead of
+	// quietly passing on a condition that stopped being true.
 	st, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
-	if m := st.Mode().Perm(); m&0o077 != 0 {
+	m := st.Mode().Perm()
+	if runtime.GOOS == "windows" {
+		if m&0o077 == 0 {
+			t.Fatalf("the transcript is mode %04o on windows, where os.WriteFile's mode "+
+				"is dropped and 0666 is expected; the reason this check is branched "+
+				"around no longer holds", m)
+		}
+		return
+	}
+	if m&0o077 != 0 {
 		t.Fatalf("the transcript is mode %04o, readable by other accounts", m)
 	}
 }
