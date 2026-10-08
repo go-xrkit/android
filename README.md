@@ -883,6 +883,127 @@ REFUSED: …/testdata/artifacts is inside the git work tree at …
 Nor does it go to a temporary directory. The artefact exists **so that a person
 can look at it**, and `t.TempDir()` would be gone before anyone could.
 
+## ⛔ When the workstation cannot reach the phone, suspect the WORKSTATION
+
+Every command here runs over a cable, and the phone has **one** USB-C port that
+the glasses want all of. The obvious escape is `adb` over Wi-Fi. When that fails
+the symptom is "I cannot reach my phone", and an evening went into a diagnosis
+that was wrong three times before it was right. The ending is worth more than
+the measurements, so it comes first.
+
+### What it turned out to be
+
+A **leftover macOS network extension** — an uninstalled VPN client whose system
+extension was still registered and still intercepting traffic:
+
+```
+$ systemextensionsctl list
+enabled active teamID     bundleID (version)                             [state]
+        *      47R2M6779T dev.firezone.firezone.network-extension (1.5.8) [activated waiting for user]
+```
+
+Removing it in **System Settings → General → Login Items & Extensions → Network
+Extensions** fixed everything at once: `ping`, `adb connect`, and `adb mdns
+services`, which had been returning an empty list while macOS's own `dns-sd`
+found the phone perfectly.
+
+### The recipe, once nothing is in the way
+
+Wireless debugging, on the phone's Settings → System → Developer options. The
+pairing port and the connect port are DIFFERENT, and both are on that screen:
+
+```sh
+adb pair 192.168.2.5:35325      # the pairing port, then type the 6-digit code
+adb connect 192.168.2.5:46187   # the listening port, from the same screen
+```
+
+From then on `adb mdns services` lists the device by name and `adb -s
+adb-<serial>-<suffix>._adb-tls-connect._tcp shell …` reaches it with no address
+at all. While the extension was in the way, `adb pair` answered `protocol fault
+(couldn't read status message)` and `adb mdns services` came back EMPTY — both
+of which read as adb being broken rather than as something eating its traffic.
+
+### ⛔ It was named as a suspect and then EXONERATED on bad reasoning
+
+Three pieces of circumstantial evidence said it was inert, and all three were
+beside the point:
+
+| the argument | why it was worthless |
+|---|---|
+| no application in `/Applications` | an extension is registered with the system, not with the app. Deleting the app does not unregister it |
+| no process in `ps` | a network extension runs as a system-managed provider, not as something with the vendor's name on it |
+| `[activated waiting for user]` | a **state string**. The fact is the `*` in the **active** column, one field to its left, and it said the extension was active |
+
+The listing had the answer in a column and prose beside it, and the prose was
+read. **Before clearing a component, check the field that states its status, not
+the one that describes it.**
+
+### ⛔ And the control varied the wrong end
+
+The same failure appeared on **two different access points** — a macOS Internet
+Sharing hotspot and a Freebox on 6 GHz — which was taken as a control: vary the
+access point, the symptom stays, therefore *the phone* is the constant. The
+access point was varied. The phone was varied, by having a third machine ping it
+successfully. **The workstation was never varied**, and the workstation was the
+answer.
+
+A control names what you changed. It cannot name what you did not think to
+change, and "everything else" is where the cause was sitting the whole time.
+
+### ⭐ The ten-second test that should have come first
+
+```
+Mac     → phone   0/3
+fractal → phone   2/2, 142–294 ms       ← a third machine, straight away
+```
+
+One line from a third machine splits the problem in half: either the phone is
+refusing everyone, or it is one path that is broken. It costs nothing, needs no
+theory, and it is the first thing to do rather than the last.
+
+### ⚠ A failure that is too fast never left the machine
+
+Attempts failed in **5 ms** with `EHOSTUNREACH`, read here as an active ICMP
+rejection. It is not: it is **macOS's negative ARP cache** short-circuiting the
+attempt without putting a packet on the wire. After a reboot cleared it, the
+same ping took its full **4.5 seconds** — a silent drop, a different mechanism
+with different causes. Read the duration before the error: a reachable host with
+a closed port takes about a second, and an instant failure is local state.
+
+### Local Network Protection: real, enabled, and NOT the cause
+
+It was blamed here, at length, and it was wrong. From **Android 17** the
+protection is mandatory and traffic to and from a local network address needs
+`ACCESS_LOCAL_NETWORK`, *including accepting incoming TCP connections* — see
+[the documentation](https://developer.android.com/privacy-and-security/local-network-permission).
+On the device:
+
+```
+$ adb shell device_config get android_core_networking \
+      android.permission.flags.access_local_network_permission_enabled
+true
+```
+
+That is true, and it matters for **any application in this repository that wants
+to be reachable**: it must declare and request that permission, and nothing here
+does yet. It did not stop `adb`, which is a system daemon, and it never had
+anything to do with `ping`. The flag cannot be turned off from a shell in any
+case — `device_config put` answers *"allowlist permission granted, but must add
+flag to the allowlist"* on a release build.
+
+Android 17 also ships **ADB Wi-Fi 2.0**, a rewritten wireless-debugging stack
+needing `adb` 37 or newer on the host. Wireless debugging works **better** on
+Android 17, not worse, and that fact was in hand early enough to have cast doubt
+on the whole diagnosis.
+
+### What this repository does regardless
+
+Each command writes its verdict with `android.SaveTranscript` into the app's
+private directory, which survives the cable being somewhere else, and
+`adb shell run-as <pkg> cat files/<name>.txt` collects it afterwards. That was
+built for the one-port problem, it is unaffected by any of this, and every
+measurement in this README was taken that way.
+
 ## Building the APK
 
 No Gradle and no Kotlin: the host is three Java files and the application is a
@@ -1080,6 +1201,10 @@ Deliberate, and stated rather than hidden:
   reported as `ErrNotCapturable` rather than attempted. `MediaProjection`
   mirrors the default display; anything else needs `CAPTURE_VIDEO_OUTPUT`,
   which is `signature`;
+- **no application here is reachable from a workstation**, because none declares
+  `ACCESS_LOCAL_NETWORK` — mandatory from Android 17 for anything that accepts
+  an incoming connection. The commands sidestep it by writing transcripts, which
+  is why they work at all; making one reachable is unwritten;
 - **the headset's camera needs usbfs, and none of that is written.** The census
   says the route and stops there: no external camera2 device on this phone, and
   every UVC streaming endpoint isochronous, so the frames are behind
