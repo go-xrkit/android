@@ -756,6 +756,65 @@ nothing to read"**, and a census that could not tell *unreachable* from
 *reachable and silent* would be worth little — the 2026-09-07 finding is that
 the headset says nothing about its orientation, not that nothing can be asked.
 
+### ⛔ usbfs was the last route, and it is shut by the permission, not the kernel
+
+The census said the frames are behind usbfs, so `cmd/xrusb` goes and asks. It
+takes four steps and reports which one the kernel stopped at: open, read the
+descriptors, claim the interface, select the alternate, and then submit one
+isochronous request — the thing `UsbDeviceConnection` cannot do at all.
+
+**It never gets past the first step**, and not for the reason anybody would
+guess. `UsbManager.requestPermission` answers **not granted in six to twenty
+milliseconds and shows no dialog** — watched on the screen, not only in a log.
+It answers the same way from a service and from a visible, focused, resumed
+Activity.
+
+And the permission is **already granted**, by the attach route (`device_filter`
+in the manifest, accepted once on a replug). The system's own records and its
+own API disagree:
+
+```
+our host:   myUid=10350  deviceName=/dev/bus/usb/001/003  hasPermission=false
+
+dumpsys usb:
+  permissions_manager={ user_permissions={ user_id=0
+    device_permissions={ device_name=/dev/bus/usb/001/003  uids=10350 } } }
+```
+
+Same uid, same device node, and `hasPermission` says false. Ruled out along the
+way, each by measurement: the `PendingIntent` being immutable or stale, the ask
+coming from a service, a remembered refusal (`user_permissions` was empty before
+the grant), the app being in a standby bucket (it is `ACTIVE`), the screen being
+locked, and `usb_data_status` (it is `enabled`).
+
+**So head tracking from the headset's camera is not available on this phone**,
+by any route an ordinary application has: camera2 does not offer the device,
+`UsbDeviceConnection` cannot submit isochronous transfers, and usbfs cannot be
+reached because the descriptor is never handed over.
+
+### What is written anyway, and why it was worth writing
+
+The probe and the layer under it are kept, because the one thing they measure
+cheaply is which step fails — and because the parts most likely to be wrong
+silently are now pinned:
+
+- the **ioctl numbers are computed** from this package's own mirrors of the
+  kernel's structs, and the suite asserts the results against the values
+  `usbdevice_fs.h` produces. A mirror that drifted changes the number, and a
+  wrong ioctl number is not a compile error and not necessarily even an error;
+- the **URB type is not the endpoint attribute**. An endpoint whose
+  `bmAttributes` say 1 is isochronous; a URB whose type is 1 is INTERRUPT. The
+  mapping is a table rather than a function that can fail, because a transfer
+  type is two bits and an error return there would be a branch no input can
+  reach — which the coverage gate found;
+- the descriptors are read with a plain `read(2)`, which needs nothing beyond
+  the open, so a failure there is the descriptor being useless and every later
+  failure is narrowed to the ioctl that produced it.
+
+⛔ **And the probe is honest about what an accepted request would mean.** It
+submits one and cancels it: that says the kernel takes the call, not that pixels
+arrive. The two are different findings and the transcript says which it has.
+
 ## Input
 
 Nothing new is needed, and that is the finding rather than an omission. A
@@ -1205,12 +1264,14 @@ Deliberate, and stated rather than hidden:
   `ACCESS_LOCAL_NETWORK` — mandatory from Android 17 for anything that accepts
   an incoming connection. The commands sidestep it by writing transcripts, which
   is why they work at all; making one reachable is unwritten;
-- **the headset's camera needs usbfs, and none of that is written.** The census
-  says the route and stops there: no external camera2 device on this phone, and
-  every UVC streaming endpoint isochronous, so the frames are behind
-  USBDEVFS_SUBMITURB on the descriptor Android hands out. Head tracking on
-  Android is therefore NOT implemented, and the measurement says why rather than
-  the plan saying when;
+- **head tracking on Android is NOT POSSIBLE on this phone**, and the
+  measurement says why rather than the plan saying when. camera2 offers no
+  external device, UsbDeviceConnection cannot submit isochronous transfers, and
+  usbfs cannot be reached because `UsbManager` will not hand the descriptor over
+  -- even though its own records say the permission is granted. See
+  [above](#-usbfs-was-the-last-route-and-it-is-shut-by-the-permission-not-the-kernel).
+  `cmd/xrusb` and the layer under it are written and tested; they stop at step
+  one;
 - **nobody has read a pixel back off the glasses, and nobody can.** An ordinary
   application may not capture a display it does not own, so
   [`Screen`](#painting-on-the-glasses-from-go) can report how many frames the

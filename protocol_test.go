@@ -637,3 +637,37 @@ func TestACameraListLongEnoughToPassTheCheapGuardAndStillWrong(t *testing.T) {
 		t.Fatalf("a camera truncated after its id reported %v", err)
 	}
 }
+
+func TestTheOpenUSBDeviceMessageSurvivesARoundTrip(t *testing.T) {
+	const name = "/dev/bus/usb/001/003"
+	got, err := DecodeOpenUSBDevice(EncodeOpenUSBDevice(name))
+	if err != nil {
+		t.Fatalf("DecodeOpenUSBDevice: %v", err)
+	}
+	if got != name {
+		t.Fatalf("round-tripped to %q, want %q", got, name)
+	}
+	// A body with a length prefix and nothing behind it. The name becomes a
+	// path the host opens, so a truncated one must be refused rather than
+	// silently shortened.
+	if _, err := DecodeOpenUSBDevice([]byte{0x00, 0x05, 'a'}); !errors.Is(err, ErrShortPayload) {
+		t.Fatalf("a cut-short name reported %v, want ErrShortPayload", err)
+	}
+}
+
+// ⛔ EVERY MESSAGE THAT CARRIES A DESCRIPTOR MUST BE CLAIMED BY THE PUMP. One
+// left out has its descriptor closed as unclaimed, and the caller is handed an
+// answer that names nothing — which reads as the host having refused rather
+// than as the transport having dropped it. There are two such messages, and
+// this is the list.
+func TestEveryMessageCarryingADescriptorIsNumbered(t *testing.T) {
+	for name, typ := range map[string]uint8{"MsgBuffer": MsgBuffer, "MsgUSBHandle": MsgUSBHandle} {
+		if typ >= 0x80 {
+			t.Fatalf("%s is %#02x, which is the app→host range; a descriptor only ever "+
+				"travels host→app", name, typ)
+		}
+	}
+	if MsgOpenUSBDevice < 0x80 {
+		t.Fatalf("MsgOpenUSBDevice is %#02x, which is the host→app range", MsgOpenUSBDevice)
+	}
+}

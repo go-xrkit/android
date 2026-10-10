@@ -87,9 +87,19 @@ sed -e "s|<!-- GW_PERMISSIONS -->|$permxml|" \
     -e "s|android:label=\"go-xrkit\"|android:label=\"$label\"|" \
     -e "s|android:name=\"org.goxrkit.args\" android:value=\"\"|android:name=\"org.goxrkit.args\" android:value=\"$appargs\"|" \
     "$here/AndroidManifest.xml" > "$out/AndroidManifest.xml"
+# Resources, which exist for ONE thing: the USB device filter that makes the
+# system offer this application when a camera is attached. requestPermission is
+# refused on Android 17 without showing anything, so the attach route is the only
+# one left -- see host/res/xml/device_filter.xml.
+res=""
+if [ -d "$here/res" ]; then
+    aapt2 compile --dir "$here/res" -o "$out/res.zip"
+    res="$out/res.zip"
+fi
 aapt2 link -I "$androidjar" \
     --manifest "$out/AndroidManifest.xml" \
     --min-sdk-version 26 --target-sdk-version "$api" \
+    $res \
     -o "$out/base.apk"
 
 echo "==> package"

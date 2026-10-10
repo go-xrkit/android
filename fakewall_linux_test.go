@@ -44,6 +44,8 @@ type fakeWall struct {
 	onScreen  func(*fakePanel, OpenScreenMessage) bool
 	onPresent func(*fakePanel, PresentMessage) bool
 	onList    func(*fakePanel) bool
+	onOpenUSB func(*fakePanel, string) bool
+	usbDesc   []byte
 
 	cameras  []Camera
 	usbDevs  []USBDevice
@@ -206,6 +208,19 @@ func (p *fakePanel) handle(typ uint8, body []byte) {
 			return
 		}
 		p.send(MsgDisplays, EncodeDisplays(ds))
+	case MsgOpenUSBDevice:
+		name, err := DecodeOpenUSBDevice(body)
+		if err != nil {
+			p.w.t.Errorf("decoding MsgOpenUSBDevice: %v", err)
+			return
+		}
+		p.w.mu.Lock()
+		hook, desc := p.w.onOpenUSB, p.w.usbDesc
+		p.w.mu.Unlock()
+		if hook != nil && hook(p, name) {
+			return
+		}
+		p.lendUSB(desc)
 	case MsgListCameras, MsgListUSBDevices:
 		p.w.mu.Lock()
 		cs, ds, hook := p.w.cameras, p.w.usbDevs, p.w.onCensus
@@ -442,4 +457,52 @@ func (w *fakeWall) setOnCensus(fn func(*fakePanel, uint8) bool) {
 	w.mu.Lock()
 	w.onCensus = fn
 	w.mu.Unlock()
+}
+
+// ---- the USB handover -----------------------------------------------------
+
+// setOnOpenUSB installs a hook that may answer MsgOpenUSBDevice itself.
+// Returning false takes the default behaviour.
+func (w *fakeWall) setOnOpenUSB(fn func(*fakePanel, string) bool) {
+	w.mu.Lock()
+	w.onOpenUSB = fn
+	w.mu.Unlock()
+}
+
+// setUSBDescriptors installs the bytes a lent descriptor will read back as.
+func (w *fakeWall) setUSBDescriptors(b []byte) {
+	w.mu.Lock()
+	w.usbDesc = b
+	w.mu.Unlock()
+}
+
+// lendUSB lends a REAL file descriptor holding the descriptor bytes.
+//
+// ⭐ A memfd IS THE RIGHT STAND-IN, and not only a convenient one. The thing
+// under test reads the descriptors with read(2) on /proc/self/fd/N, which works
+// against a memfd exactly as it does against usbfs — so that path is exercised
+// for real. The IOCTLS are what a memfd cannot serve, and it answers ENOTTY,
+// which is precisely the refusal the probe exists to tell apart from a
+// permission one.
+func (p *fakePanel) lendUSB(b []byte) {
+	fd, err := unix.MemfdCreate("xr-usb-test", unix.MFD_CLOEXEC)
+	if err != nil {
+		p.w.t.Errorf("memfd_create: %v", err)
+		return
+	}
+	defer func() { _ = unix.Close(fd) }()
+	if len(b) > 0 {
+		if _, err := unix.Write(fd, b); err != nil {
+			p.w.t.Errorf("writing the descriptors: %v", err)
+			return
+		}
+		if _, err := unix.Seek(fd, 0, 0); err != nil {
+			p.w.t.Errorf("rewinding: %v", err)
+			return
+		}
+	}
+	if _, _, err := p.conn.WriteMsgUnix(FrameMessage(MsgUSBHandle, nil),
+		unix.UnixRights(fd), nil); err != nil {
+		p.w.t.Logf("lending the USB descriptor: %v", err)
+	}
 }

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) the go-xrkit/android authors. All rights reserved.
+  SPDX-License-Identifier: BSD-3-Clause
+
+  ⛔ THE ATTACH ROUTE, BECAUSE THE ASK ROUTE IS REFUSED.
+
+  UsbManager.requestPermission on a Pixel 11 Pro Fold running Android 17 answers
+  NOT GRANTED IN TWENTY MILLISECONDS AND SHOWS NO DIALOG — confirmed by watching
+  the screen while it ran, not only in a log. It answers the same way from a
+  service and from a visible, focused, foreground Activity; there is no
+  remembered refusal (user_permissions is empty), the screen is unlocked and
+  usb_data_status is enabled.
+
+  So permission is taken the other way round. A device named here, attached while
+  this application is installed, makes the system offer this application to the
+  user. Accepting grants the permission PERSISTENTLY, and requestPermission is
+  never involved.
+
+  ⚠ IT COSTS A REPLUG. The offer is made when the device is attached, so a
+  headset already plugged in when the APK was installed will not produce one
+  until it is unplugged and plugged back.
+-->
+<resources>
+    <!--
+      The camera a VITURE Beast carries: a Sonix part, 0c45:6368, measured by
+      cmd/xrcam. It is NOT a VITURE device — the headset arrives as three, and
+      the camera is its own chip with its own vendor.
+
+      ⚠ ANOTHER HEADSET NEEDS ITS OWN LINE. This matches one camera by its ids
+      rather than matching every UVC device by class, and deliberately: the
+      device class of a composite camera is 0xef/0x02/0x01, which is shared by a
+      great many things that are not cameras, and a filter that broad would have
+      this application offered every time anybody plugs in a webcam, a headset or
+      a docking station.
+    -->
+    <usb-device vendor-id="3141" product-id="25448" />
+</resources>

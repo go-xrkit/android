@@ -27,6 +27,9 @@ import java.util.List;
  * against it, which is all any host has to do.
  */
 public final class XrDemoActivity extends Activity {
+    /** Whether the hosts and the application have been started; see onResume. */
+    private boolean started;
+
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -35,6 +38,39 @@ public final class XrDemoActivity extends Activity {
         tv.setTextSize(20);
         tv.setPadding(48, 200, 48, 48);
         setContentView(tv);
+    }
+
+    /**
+     * Starts the hosts and the application, ONCE, and not before this Activity
+     * is resumed.
+     *
+     * <p>⛔⛔ onCreate IS TOO EARLY, AND THE PLATFORM SAYS SO BY CRASHING.
+     * Starting the wall host from onCreate threw, on a phone that had been idle
+     * for two days:
+     *
+     * <pre>
+     * BackgroundServiceStartNotAllowedException: Not allowed to start service
+     *   XrWallService: app is in background uid u0a350 ... bg:+53ms idle
+     * </pre>
+     *
+     * The process is credited as FOREGROUND some milliseconds after its first
+     * Activity is created, and until then every background restriction applies
+     * to it.
+     *
+     * <p>⭐ AND THAT IS NOT ONLY A CRASH. The same window explains why
+     * UsbManager.requestPermission answered "not granted" in twenty
+     * milliseconds without showing anything: the permission dialog is an
+     * Activity, a background application may not launch one, and the platform
+     * reports that refusal AS THE USER HAVING DECLINED. One cause, two
+     * symptoms, and the second one lies about what happened.
+     */
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (started) {
+            return;
+        }
+        started = true;
 
         // The wall host is an ordinary service: no projection, no consent, no
         // foreground requirement. It is started first and unconditionally,
