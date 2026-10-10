@@ -787,10 +787,51 @@ coming from a service, a remembered refusal (`user_permissions` was empty before
 the grant), the app being in a standby bucket (it is `ACTIVE`), the screen being
 locked, and `usb_data_status` (it is `enabled`).
 
-**So head tracking from the headset's camera is not available on this phone**,
-by any route an ordinary application has: camera2 does not offer the device,
-`UsbDeviceConnection` cannot submit isochronous transfers, and usbfs cannot be
-reached because the descriptor is never handed over.
+### ⭐ And the reason the descriptor is never handed over: the KERNEL OWNS IT
+
+The camera is not broken, unsupported or asleep. It is DRIVEN:
+
+```
+/dev/video0  crw-rw----  system camera
+1-1.1:1.0  driver=uvcvideo      # the UVC control interface
+1-1.1:1.1  driver=uvcvideo      # the streaming interface
+video0 -> …/usb1/1-1/1-1.1/1-1.1:1.0/video4linux/video0
+```
+
+The kernel's own `uvcvideo` holds both interfaces and has published a V4L2 node
+for them. Android refuses an application a USB device a kernel driver owns,
+which is why `requestPermission` answers without asking — and it is **circular**:
+`usbfs` exists precisely to take an interface away from a driver, and it is
+behind that same refusal. The microphone (`snd-usb-audio`) and the glasses' own
+HID and CDC interfaces are in exactly the same position.
+
+### And the V4L2 node is not reachable either, for a plainer reason
+
+```
+V4L2 uid=10350 groups=[9997 20350 50350] camera(1006)=false
+V4L2 /dev/video0  REFUSED: open /dev/video0: permission denied
+```
+
+With `android.permission.CAMERA` **granted**, the process is still not in the
+`camera` group: the old mapping from that permission to AID_CAMERA is gone. The
+node is `system:camera`, so the ordinary Unix check refuses — and it refuses
+FIRST. There is no `avc: denied` for a `video_device` in the log at all, so
+SELinux was never consulted. "SELinux would block it" was the prediction; the
+measurement is simpler and more final than that.
+
+### Every route, and the different reason each one is shut
+
+| route | why it is shut |
+|---|---|
+| **camera2** | no external-camera HAL publishes the device; the list is identical before and after |
+| **UsbDeviceConnection** | every streaming endpoint is isochronous, which it cannot submit |
+| **usbfs** | `UsbManager` will not hand over a device a kernel driver owns, and `uvcvideo` owns it |
+| **/dev/video0** | owned `system:camera`, and `CAMERA` grants no supplementary group any more |
+
+**So head tracking from the headset's camera needs a privileged component on
+this phone** — a vendor HAL, a system app, or root. Nothing an ordinary
+application can do reaches those frames, and each of the four routes is shut for
+its own measured reason.
 
 ### What is written anyway, and why it was worth writing
 
@@ -1264,14 +1305,14 @@ Deliberate, and stated rather than hidden:
   `ACCESS_LOCAL_NETWORK` — mandatory from Android 17 for anything that accepts
   an incoming connection. The commands sidestep it by writing transcripts, which
   is why they work at all; making one reachable is unwritten;
-- **head tracking on Android is NOT POSSIBLE on this phone**, and the
-  measurement says why rather than the plan saying when. camera2 offers no
-  external device, UsbDeviceConnection cannot submit isochronous transfers, and
-  usbfs cannot be reached because `UsbManager` will not hand the descriptor over
-  -- even though its own records say the permission is granted. See
-  [above](#-usbfs-was-the-last-route-and-it-is-shut-by-the-permission-not-the-kernel).
-  `cmd/xrusb` and the layer under it are written and tested; they stop at step
-  one;
+- **head tracking on Android needs a PRIVILEGED component on this phone**, and
+  the measurement says why rather than the plan saying when. All FOUR routes are
+  shut, each for its own reason: camera2 publishes no external device,
+  UsbDeviceConnection cannot submit isochronous transfers, `UsbManager` will not
+  hand over a device `uvcvideo` owns, and /dev/video0 is `system:camera` while
+  `CAMERA` grants no supplementary group. See
+  [above](#-every-route-and-the-different-reason-each-one-is-shut). `cmd/xrusb`
+  and the layer under it are written and tested; they stop at step one;
 - **nobody has read a pixel back off the glasses, and nobody can.** An ordinary
   application may not capture a display it does not own, so
   [`Screen`](#painting-on-the-glasses-from-go) can report how many frames the

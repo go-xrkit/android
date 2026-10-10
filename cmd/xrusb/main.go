@@ -65,6 +65,7 @@ func run(ctx context.Context, args []string) int {
 		say("FAIL no wall host: this must run inside the APK")
 		return 1
 	}
+	reportV4L2(say)
 	dev, ok := awaitCamera(ctx, *wait, say)
 	if !ok {
 		return 1
@@ -158,6 +159,58 @@ func run(ctx context.Context, args []string) int {
 	say("⚠ ACCEPTED IS NOT STREAMING. This submitted one request and cancelled it; it " +
 		"says the kernel takes the call, not that pixels arrive.")
 	return 0
+}
+
+// AIDCamera is Android's camera group, AID_CAMERA. /dev/video* is owned
+// system:camera, so a process in this group could open it directly.
+const AIDCamera = 1006
+
+// reportV4L2 asks whether the headset's camera can be reached as a V4L2 device
+// instead of as a USB one.
+//
+// ⭐ IT IS THE LAST ROUTE, AND IT EXISTS BECAUSE THE KERNEL ALREADY WORKS. The
+// camera is driven: uvcvideo holds both its interfaces and has published
+// /dev/video0. That is also WHY the USB route is shut — Android refuses an
+// application a device a kernel driver owns, and usbfs, which exists to take an
+// interface from a driver, is behind that same refusal.
+//
+// So the question becomes whether the node itself is reachable. Two things are
+// measured rather than argued:
+//
+//   - the process's GROUPS. On older Android, android.permission.CAMERA granted
+//     the camera GID, and a process holding it could open the node. If 1006 is
+//     absent, no amount of permission will help;
+//   - the open itself. EACCES can come from the group OR from SELinux, and the
+//     two are told apart by `logcat | grep "avc: denied"`, which names the
+//     class and the context.
+//
+// ⚠ A FAILURE HERE IS EXPECTED AND IS STILL WORTH MEASURING. SELinux almost
+// certainly denies an untrusted_app on a video_device; "almost certainly" is not
+// a measurement, and this is the cheapest one that settles it.
+func reportV4L2(say func(string, ...any)) {
+	groups, err := os.Getgroups()
+	if err != nil {
+		say("⚠ Getgroups: %v", err)
+	}
+	inCamera := false
+	for _, g := range groups {
+		if g == AIDCamera {
+			inCamera = true
+		}
+	}
+	say("V4L2 uid=%d groups=%v camera(%d)=%t", os.Getuid(), groups, AIDCamera, inCamera)
+
+	for _, node := range []string{"/dev/video0", "/dev/video1"} {
+		f, err := os.OpenFile(node, os.O_RDWR, 0)
+		if err != nil {
+			say("V4L2 %s  REFUSED: %v", node, err)
+			continue
+		}
+		_ = f.Close()
+		say("V4L2 %s  OPENED — the camera is reachable as a V4L2 device, and a pure-Go "+
+			"VIDIOC_* path is open", node)
+	}
+	say("")
 }
 
 // streamingEndpoint picks the UVC streaming interface's alternate with the
