@@ -283,7 +283,11 @@ func (s *session) pump() {
 			return
 		}
 		fd := -1
-		if typ == MsgBuffer {
+		// ⛔ EVERY MESSAGE THAT CARRIES A DESCRIPTOR MUST BE NAMED HERE. One
+		// left out has its descriptor closed as unclaimed, and the caller is
+		// handed an answer that names nothing -- which reads as the host having
+		// refused rather than as the transport having dropped it.
+		if typ == MsgBuffer || typ == MsgUSBHandle {
 			fd = s.fc.claimFD()
 		}
 		switch {
@@ -388,8 +392,27 @@ func (s *session) send(typ uint8, body []byte) error {
 	return err
 }
 
-// request sends one message and waits for the host's answer.
+// request sends one message and waits for the host's answer, keeping only its
+// body.
+//
+// ⚠ IT DISCARDS NOTHING. Of the two messages that carry a descriptor, MsgBuffer
+// is collected with [session.await] and MsgUSBHandle with [session.requestReply];
+// no caller of this asks for either, so the reply's fd is always -1 here. A
+// caller that wanted one would use requestReply, and writing that down is what
+// keeps a future one from quietly leaking it.
 func (s *session) request(ctx context.Context, typ uint8, body []byte, want uint8) ([]byte, error) {
+	r, err := s.requestReply(ctx, typ, body, want)
+	return r.body, err
+}
+
+// requestReply sends one message and waits for the host's answer, WHOLE —
+// including any descriptor riding on it.
+//
+// It is the one place a request's send failure is reported, which is why
+// OpenUSB goes through it rather than repeating the handshake: a second copy of
+// that error path would be a second thing to test, on a write nothing can make
+// fail on demand.
+func (s *session) requestReply(ctx context.Context, typ uint8, body []byte, want uint8) (reply, error) {
 	s.reqMu.Lock()
 	defer s.reqMu.Unlock()
 	// Drain every answer left over from an abandoned request, so this one is
@@ -407,10 +430,9 @@ func (s *session) request(ctx context.Context, typ uint8, body []byte, want uint
 		break
 	}
 	if err := s.send(typ, body); err != nil {
-		return nil, fmt.Errorf("android: sending 0x%02x: %w", typ, err)
+		return reply{fd: -1}, fmt.Errorf("android: sending 0x%02x: %w", typ, err)
 	}
-	r, err := s.await(ctx, want)
-	return r.body, err
+	return s.await(ctx, want)
 }
 
 // await waits for the host's next answer of the wanted type, without sending
@@ -465,6 +487,8 @@ func hostError(e ErrorMessage) error {
 		return fmt.Errorf("%w: %s", ErrTooManyDisplays, e.Detail)
 	case e.Code == codeNotPresentable:
 		return fmt.Errorf("%w: %s", ErrNotPresentable, e.Detail)
+	case e.Code == codeUSBPermissionDenied:
+		return fmt.Errorf("%w: %s", ErrUSBPermissionDenied, e.Detail)
 	}
 	return e
 }
@@ -482,6 +506,9 @@ const (
 	// because the two can disagree: a headset unplugged between the display
 	// list and the request is gone on the host's side only.
 	codeNotPresentable = 6
+	// codeUSBPermissionDenied is the user declining the system's USB dialog. It
+	// is a DECISION rather than a failure, and the sentinel says so.
+	codeUSBPermissionDenied = 7
 )
 
 // Displays returns every display the host can see.

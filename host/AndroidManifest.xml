@@ -53,6 +53,20 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- ⛔ THE ATTACH ROUTE. UsbManager.requestPermission answers NOT
+                 GRANTED in twenty milliseconds and shows no dialog on Android 17
+                 - watched on the screen, not only in a log. A device named in
+                 device_filter.xml makes the system OFFER this application when
+                 it is attached, and accepting grants the permission
+                 persistently. ⚠ It costs a REPLUG: a headset already plugged in
+                 when the APK was installed produces no offer until it is
+                 unplugged and plugged back. -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                       android:resource="@xml/device_filter" />
         </activity>
 
         <!-- The display probe. Not a launcher activity: it is started by hand
@@ -62,6 +76,15 @@
         <activity android:name="org.goxrkit.android.XrDisplayProbeActivity"
                   android:exported="true"
                   android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- ⛔ NOT EXPORTED. It opens the USB device it is told to, so an
+             exported one would let any application drive this one into asking
+             for a device of their choosing under our name. -->
+        <activity android:name="org.goxrkit.android.XrUsbPermissionActivity"
+                  android:exported="false"
+                  android:excludeFromRecents="true"
+                  android:noHistory="true"
+                  android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <activity android:name="org.goxrkit.android.XrConsentActivity"
                   android:exported="false"

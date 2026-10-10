@@ -119,6 +119,13 @@ public final class XrWallService extends Service {
     private static final int MSG_DISPLAYS = 0x01, MSG_LIST_DISPLAYS = 0x81;
     private static final int MSG_CAMERAS = 0x09, MSG_USB_DEVICES = 0x0a;
     private static final int MSG_LIST_CAMERAS = 0x89, MSG_LIST_USB_DEVICES = 0x8a;
+    private static final int MSG_USB_HANDLE = 0x0b, MSG_OPEN_USB_DEVICE = 0x8b;
+
+    /** Matches android.ErrUSBPermissionDenied's code on the wire. */
+    private static final int CODE_USB_PERMISSION_DENIED = 7;
+
+    /** The action a USB permission result comes back on. */
+    static final String ACTION_USB_PERMISSION = "org.goxrkit.android.USB_PERMISSION";
 
     private static final int STOP_SYSTEM = 1, STOP_APP = 2;
     private static final int CODE_NOT_FOUND = 3;
@@ -219,6 +226,13 @@ public final class XrWallService extends Service {
          */
         private int screenStride;
 
+        /**
+         * The USB device this connection opened, held open for as long as the
+         * application holds the descriptor: the platform drops the device when
+         * this is closed, and the descriptor over there would then name nothing.
+         */
+        private android.hardware.usb.UsbDeviceConnection usb;
+
         Panel(LocalSocket s) {
             this.sock = s;
         }
@@ -270,6 +284,9 @@ public final class XrWallService extends Service {
                     break;
                 case MSG_LIST_USB_DEVICES:
                     handler.post(this::sendUsbDevices);
+                    break;
+                case MSG_OPEN_USB_DEVICE:
+                    handler.post(() -> openUsbDevice(new Dec(body).str()));
                     break;
                 case MSG_OPEN_SCREEN:
                     handler.post(() -> openScreen(body));
@@ -539,6 +556,122 @@ public final class XrWallService extends Service {
         }
 
         /**
+         * Opens one USB device, asking the user if it has not been allowed
+         * before, and lends the kernel's descriptor to the application.
+         *
+         * <p>⛔ THIS IS THE ONE THING HERE THAT COSTS A CLICK. Everything else
+         * this service answers needs no permission at all; opening a USB device
+         * puts a system dialog in front of the user naming the device and this
+         * application, and they may refuse. That is reported as a decision
+         * rather than as a failure.
+         *
+         * <p>It exists because a headset's camera is reachable through NEITHER
+         * Android camera API on this phone — no external camera2 device, and
+         * every UVC streaming endpoint isochronous, which UsbDeviceConnection
+         * cannot submit. The descriptor is the only remaining route, and
+         * whether the kernel lets an untrusted application drive it is what the
+         * application is about to find out.
+         */
+        private void openUsbDevice(String name) {
+            android.hardware.usb.UsbManager um =
+                    getSystemService(android.hardware.usb.UsbManager.class);
+            if (um == null) {
+                error(CODE_NOT_FOUND, "openUsbDevice", "this device has no USB host support");
+                return;
+            }
+            android.hardware.usb.UsbDevice dev = um.getDeviceList().get(name);
+            if (dev == null) {
+                error(CODE_NOT_FOUND, "openUsbDevice",
+                        "no USB device called " + name + " is attached any more");
+                return;
+            }
+            Log.i(TAG, "openUsbDevice " + name + ": myUid=" + android.os.Process.myUid()
+                    + " myPid=" + android.os.Process.myPid()
+                    + " deviceName=" + dev.getDeviceName()
+                    + " hasPermission=" + um.hasPermission(dev));
+            if (um.hasPermission(dev)) {
+                lendUsbDevice(um, dev);
+                return;
+            }
+            // The answer comes back as a broadcast. The receiver unregisters
+            // itself: a connection that asked twice would otherwise leave one
+            // behind per attempt, and the second answer would be delivered to
+            // both.
+            android.content.BroadcastReceiver rx = new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(Context c, Intent i) {
+                    // ⛔ SAY WHAT ARRIVED, NOT WHAT IT MEANT. A broadcast with no
+                    // extras and a broadcast carrying a refusal both read as
+                    // "denied" through getBooleanExtra's default, and they are
+                    // different failures: one is the user, the other is the
+                    // request never reaching the system.
+                    Log.i(TAG, "usb permission broadcast: action=" + i.getAction()
+                            + " extras=" + i.getExtras()
+                            + " granted=" + i.getBooleanExtra(
+                                    android.hardware.usb.UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                            + " hasPermission=" + um.hasPermission(dev));
+                    try {
+                        c.unregisterReceiver(this);
+                    } catch (RuntimeException ignored) {
+                        // Already gone.
+                    }
+                    if (!i.getBooleanExtra(
+                            android.hardware.usb.UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                        error(CODE_USB_PERMISSION_DENIED, "requestPermission",
+                                "the permission broadcast for " + name + " came back not "
+                                        + "granted -- which is the user refusing, OR the "
+                                        + "request never reaching anybody");
+                        return;
+                    }
+                    handler.post(() -> lendUsbDevice(um, dev));
+                }
+            };
+            registerReceiver(rx, new android.content.IntentFilter(ACTION_USB_PERMISSION),
+                    Context.RECEIVER_NOT_EXPORTED);
+            // ⛔ AN ACTIVITY ASKS, NOT THIS SERVICE. requestPermission from here
+            // answered DENIED IN EIGHT MILLISECONDS with no dialog shown: the
+            // dialog is an activity, and a service asking for one is a background
+            // activity launch, which the platform refuses and reports as a refusal
+            // BY THE USER. Same shape as XrConsentActivity, same reason.
+            startActivity(new Intent(XrWallService.this, XrUsbPermissionActivity.class)
+                    .putExtra(XrUsbPermissionActivity.EXTRA_DEVICE_NAME, name)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION));
+        }
+
+        /**
+         * Hands the open device's descriptor over, and keeps the connection.
+         *
+         * <p>⛔ THE OWNERSHIP DANCE IS THE POINT. UsbDeviceConnection owns the
+         * descriptor; SCM_RIGHTS gives the application its OWN copy of it, so
+         * both sides can use it independently — but the wrapper used to put it
+         * on the socket must not take ownership on the way past. adoptFd makes
+         * a ParcelFileDescriptor that would close the connection's descriptor
+         * when collected, so detachFd hands it straight back afterwards.
+         *
+         * <p>The connection itself is held until this panel is released: the
+         * platform drops the device when it is closed, and the descriptor in
+         * the application would then name nothing.
+         */
+        private void lendUsbDevice(android.hardware.usb.UsbManager um,
+                android.hardware.usb.UsbDevice dev) {
+            android.hardware.usb.UsbDeviceConnection c = um.openDevice(dev);
+            if (c == null) {
+                error(0, "openDevice", "the platform would not open " + dev.getDeviceName());
+                return;
+            }
+            usb = c;
+            android.os.ParcelFileDescriptor pfd =
+                    android.os.ParcelFileDescriptor.adoptFd(c.getFileDescriptor());
+            try {
+                sendWithFD(MSG_USB_HANDLE, new byte[0], pfd.getFileDescriptor());
+            } finally {
+                pfd.detachFd();
+            }
+            Log.i(TAG, "lent the descriptor of " + dev.getDeviceName() + " "
+                    + String.format("%04x:%04x", dev.getVendorId(), dev.getProductId()));
+        }
+
+        /**
          * Shows a Presentation on a display that ALREADY EXISTS and lends the
          * buffer the application will paint into.
          *
@@ -792,6 +925,10 @@ public final class XrWallService extends Service {
                 reader.setOnImageAvailableListener(null, null);
                 reader.close();
                 reader = null;
+            }
+            if (usb != null) {
+                usb.close();
+                usb = null;
             }
             frameView = null;
             synchronized (pixelLock) {

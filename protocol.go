@@ -933,3 +933,34 @@ func takeCount(b []byte, what string) (int, []byte, error) {
 	}
 	return n, b[4:], nil
 }
+
+// USB handover messages. Opening a USB device is the one thing in this package
+// that ASKS THE USER — a system dialog naming the device and the application —
+// so it is the one census question that costs a click.
+const (
+	// MsgUSBHandle answers MsgOpenUSBDevice with the device's file descriptor,
+	// as an ancillary descriptor. It carries no body: the descriptor is the
+	// message.
+	//
+	// It is the SECOND message in this protocol to ride on SCM_RIGHTS, and for
+	// the opposite reason from MsgBuffer: there the host owns memory the
+	// application reads, here the host owns a KERNEL HANDLE the application
+	// drives with ioctl. Android will not let an ordinary process open
+	// /dev/bus/usb at all, so the descriptor can only come from a component
+	// that asked the user.
+	MsgUSBHandle uint8 = 0x0b
+
+	// MsgOpenUSBDevice asks the host to open one USB device by name, after
+	// obtaining the user's permission for it, and to lend the descriptor.
+	MsgOpenUSBDevice uint8 = 0x8b
+)
+
+// EncodeOpenUSBDevice encodes the name of the device to open — the node name
+// from [USBDevice.Name], which is what a USB permission is granted against.
+func EncodeOpenUSBDevice(name string) []byte { return appendString(nil, name) }
+
+// DecodeOpenUSBDevice decodes it.
+func DecodeOpenUSBDevice(b []byte) (string, error) {
+	name, _, err := takeString(b)
+	return name, err
+}
