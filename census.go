@@ -197,6 +197,47 @@ type USBInterface struct {
 	Endpoints []USBEndpoint
 }
 
+// ZeroBandwidthAlternate is alternate setting 0 of a UVC streaming interface.
+//
+// ⛔ IT IS WHERE A STREAMING INTERFACE MUST SIT WHILE IT IS NEGOTIATED.
+// Alternate 0 of a video streaming interface carries no isochronous endpoint at
+// all — that is what "zero bandwidth" means — and the host parks there when not
+// streaming so the bus's isochronous budget is not held. UVC then treats the
+// move AWAY from it, after a commit, as the signal to start sending.
+const ZeroBandwidthAlternate = 0
+
+// PickAlternate chooses the alternate setting of one interface that can carry a
+// committed payload, and that alternate's isochronous IN endpoint.
+//
+// ⛔⛔ THE SMALLEST THAT FITS, AND AFTER THE COMMIT. Not the largest: an
+// alternate's endpoint reserves bus bandwidth for as long as it is selected, so
+// taking 3072 bytes an interval to carry 2400 holds part of every high-speed
+// microframe away from everything else on the bus for nothing. And not before
+// the commit, because the payload is not known until the camera has answered.
+func PickAlternate(ifaces []USBInterface, number int, payload uint32) (USBInterface, USBEndpoint, bool) {
+	var best USBInterface
+	var bestEP USBEndpoint
+	found := false
+	for _, i := range ifaces {
+		if i.Number != number || i.Alternate == ZeroBandwidthAlternate {
+			continue
+		}
+		for _, e := range i.Endpoints {
+			if !e.In() || e.Type() != USBTransferIsochronous {
+				continue
+			}
+			size := e.ISOPacketSize()
+			if size <= 0 || uint32(size) < payload {
+				continue
+			}
+			if !found || size < bestEP.ISOPacketSize() {
+				best, bestEP, found = i, e, true
+			}
+		}
+	}
+	return best, bestEP, found
+}
+
 // Video reports whether this interface is a UVC one.
 func (i USBInterface) Video() bool { return i.Class == USBClassVideo }
 

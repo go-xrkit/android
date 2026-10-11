@@ -35,5 +35,13 @@ func (s *UVCStream) Stats() UVCStreamStats { return UVCStreamStats{} }
 // Negotiation is what the camera agreed to for this stream.
 func (s *UVCStream) Negotiation() UVCNegotiation { return s.neg }
 
+// Assembler is the frame assembler this stream feeds.
+//
+// ⛔ nil OFF ANDROID, NOT AN EMPTY ONE. An assembler with no frames in it reads
+// as a camera that delivered nothing, which is a different statement from
+// "there is no camera on this platform" — and a caller printing a census would
+// publish the first while meaning the second.
+func (s *UVCStream) Assembler() *FrameAssembler { return nil }
+
 // Close cancels every outstanding request. It is idempotent.
 func (s *UVCStream) Close() error { return nil }

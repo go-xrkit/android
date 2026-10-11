@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"slices"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -113,7 +112,7 @@ func (f *fakeStream) install() {
 
 // fill writes the next request's worth of packets into one slot.
 func (f *fakeStream) fill(slot *urbSlot) {
-	for i := 0; i < ISOPacketsPerURB; i++ {
+	for i := 0; i < StreamPacketsPerURB; i++ {
 		d := (*usbdevfsISOPacketDesc)(unsafe.Pointer(&slot.raw[urbSize+isoPacketSize*i]))
 		if len(f.packets) == 0 {
 			d.ActualLength = 0
@@ -220,7 +219,7 @@ func TestAStreamDeliversAFrameAndKeepsTheRingFull(t *testing.T) {
 	// Idle first, because a stream that only worked on a camera already talking
 	// would hang on a real one; then a frame, then the next frame's first
 	// packet, which is what ends it.
-	f.sendEmpty(ISOPacketsPerURB)
+	f.sendEmpty(StreamPacketsPerURB)
 	f.sendFrame(false, 0x5A, whole, 1024)
 	f.sendFrame(true, 0xA5, 1024, 1024)
 
@@ -251,10 +250,10 @@ func TestAStreamDeliversAFrameAndKeepsTheRingFull(t *testing.T) {
 	if st.Frames != 1 {
 		t.Errorf("Stats reports %d frames, want 1 (%s)", st.Frames, st)
 	}
-	if st.Empty < ISOPacketsPerURB {
+	if st.Empty < StreamPacketsPerURB {
 		t.Errorf("Stats reports %d empty packets, want at least %d: an idle endpoint's "+
 			"empty packets are normal and must be counted, not dropped",
-			st.Empty, ISOPacketsPerURB)
+			st.Empty, StreamPacketsPerURB)
 	}
 	if st.Bytes < whole {
 		t.Errorf("Stats reports %d bytes for a %d-byte frame", st.Bytes, whole)
@@ -273,7 +272,7 @@ func TestTwoFramesInOneRequestAreBothDelivered(t *testing.T) {
 	// ⛔⛔ THE FIRST VERSION OF drain OVERWROTE ITS RESULT, so a request that
 	// completed two frames delivered the last and counted both: Stats said two,
 	// the caller got one, and the second Frame call then hung until its
-	// deadline. ISOPacketsPerURB packets a request means a frame small enough
+	// deadline. StreamPacketsPerURB packets a request means a frame small enough
 	// to fit in fewer than that finishes twice inside one drain — which never
 	// happens at 640x480, where a frame is some two hundred packets. THIS TEST
 	// IS THE ONLY WAY THAT DEFECT WAS EVER GOING TO BE SEEN.
@@ -316,14 +315,14 @@ func TestACallerSlowerThanTheCameraLosesTheOldestFrames(t *testing.T) {
 	// slow tracker is not a failing cable.
 	// ⭐ ONE PACKET A FRAME, so that MORE than the ceiling completes inside a
 	// single request: a 320x1 frame is 640 bytes and a request carries
-	// ISOPacketsPerURB of them. A 320x2 frame takes two packets, four frames
+	// StreamPacketsPerURB of them. A 320x2 frame takes two packets, four frames
 	// fit, and four is not more than four — the first version of this test
 	// never reached the shedding at all and passed anyway.
 	const w, h = 320, 1
 	whole := w * h * BytesPerPixelYUY2
 	f := &fakeStream{t: t, packet: 3072}
 	f.install()
-	for i := 0; i < ISOPacketsPerURB; i++ {
+	for i := 0; i < StreamPacketsPerURB; i++ {
 		f.sendFrame(i%2 == 1, byte(0x10+i), whole, whole)
 	}
 
@@ -355,6 +354,148 @@ func TestACallerSlowerThanTheCameraLosesTheOldestFrames(t *testing.T) {
 		t.Errorf("the frame delivered is the oldest one (%#02x); the oldest is what gets "+
 			"shed, or a tracker runs on stale pixels", got)
 	}
+}
+
+// TestAForeignCompletionIsSkippedAndCOUNTED.
+//
+// ⛔⛔ IT WAS FATAL, AND THAT ENDED THE FIRST ON-DEVICE RUN ON ITS FIRST CALL.
+// The probe's own SubmitISO had cancelled a test request without reaping it; a
+// cancelled request still completes and still waits in the queue, and the queue
+// belongs to the DESCRIPTOR rather than to whoever submitted. The stream
+// collected that orphan, said it did not own it, and stopped:
+//
+//	STEP 8 stream  0 frame(s) in 0s, 0 packets
+//	STOPPED BY: … completed a request at 0x79f466a000 that this stream does not own
+//
+// That litter is cleaned up at the source now (see reapOwn), but one stray
+// request from anything else reading the same device must not end a working
+// camera. It is counted, because the alternative to fatal is not silence.
+func TestAForeignCompletionIsSkippedAndCounted(t *testing.T) {
+	const w, h = 320, 2
+	whole := w * h * BytesPerPixelYUY2
+	f := &fakeStream{t: t, packet: 3072, reapUnknown: true}
+	f.install()
+	f.sendFrame(false, 0x5E, whole, 1024)
+	f.sendFrame(true, 0x5F, 1024, 1024)
+
+	s, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), w, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// The foreign completion comes first, and the frame still arrives.
+	img, err := s.Frame(streamCtx(t))
+	if err != nil {
+		t.Fatalf("Frame = %v; a stray completion must not end the stream", err)
+	}
+	if got := img.Pix[0]; got != 0x5E {
+		t.Errorf("the frame carries %#02x, want %#02x", got, 0x5E)
+	}
+	st := s.Stats()
+	if st.Foreign != 1 {
+		t.Errorf("Stats reports %d foreign completion(s), want 1: skipping one "+
+			"silently would make a stream eating other people's requests look "+
+			"merely slow (%s)", st.Foreign, st)
+	}
+	if s.Assembler() == nil {
+		t.Error("Assembler() is nil on a running stream")
+	}
+}
+
+// TestSubmitISOLeavesNothingInTheQueue.
+//
+// ⛔⛔ DISCARDING A REQUEST DOES NOT REMOVE IT FROM THE COMPLETION QUEUE, and
+// SubmitISO discarded without reaping for as long as nothing else read the same
+// descriptor. The first thing that did — the stream — got the orphan.
+func TestSubmitISOLeavesNothingInTheQueue(t *testing.T) {
+	ep := isoEndpoint(3072)
+	// A fake kernel that remembers what was submitted, discarded and reaped.
+	var submitted, discarded []uintptr
+	var reaps int
+	queue := []uintptr{}
+	oldSubmit, oldReap, oldDiscard, oldIoctl := submitURB, reapURB, discardURB, ioctl
+	t.Cleanup(func() {
+		submitURB, reapURB, discardURB, ioctl = oldSubmit, oldReap, oldDiscard, oldIoctl
+	})
+	// SubmitISO goes through the raw ioctl, not through the slot seams, so the
+	// submit is intercepted there and the ADDRESS is what the kernel would be
+	// handed.
+	ioctl = func(_ int, req uintptr, p unsafe.Pointer) error {
+		switch req {
+		case usbdevfsSubmitURB:
+			a := uintptr(p)
+			submitted = append(submitted, a)
+			queue = append(queue, a)
+			return nil
+		case usbdevfsDiscardURB:
+			discarded = append(discarded, uintptr(p))
+			return nil
+		}
+		return nil
+	}
+	reapURB = func(int) (uintptr, error) {
+		reaps++
+		if len(queue) == 0 {
+			return 0, syscall.EAGAIN
+		}
+		got := queue[0]
+		queue = queue[1:]
+		return got, nil
+	}
+
+	if err := (&USBHandle{name: "001/002", fd: -1}).SubmitISO(ep); err != nil {
+		t.Fatalf("SubmitISO: %v", err)
+	}
+	if len(submitted) != 1 || len(discarded) != 1 {
+		t.Fatalf("submitted %d, discarded %d; want one of each",
+			len(submitted), len(discarded))
+	}
+	if len(queue) != 0 {
+		t.Errorf("%d request(s) left in the completion queue; the next reader gets "+
+			"them and cannot tell them from its own", len(queue))
+	}
+	if reaps == 0 {
+		t.Error("SubmitISO never reaped, so the request it cancelled is still queued")
+	}
+}
+
+// reapOwn must not sit forever on a request that never comes back, and must not
+// keep taking other readers' completions while it looks.
+func TestReapOwnIsBoundedAndDoesNotEatOthers(t *testing.T) {
+	oldReap := reapURB
+	t.Cleanup(func() { reapURB = oldReap })
+
+	t.Run("a request that never completes", func(t *testing.T) {
+		n := 0
+		reapURB = func(int) (uintptr, error) { n++; return 0, syscall.EAGAIN }
+		reapOwn(-1, 0xdeadbeef)
+		if n != ReapTries {
+			t.Errorf("tried %d times, want the bound of %d: waiting forever would "+
+				"hang a probe on a question it has already answered", n, ReapTries)
+		}
+	})
+
+	t.Run("somebody else's completion stops the search", func(t *testing.T) {
+		n := 0
+		reapURB = func(int) (uintptr, error) { n++; return 0x1234, nil }
+		reapOwn(-1, 0xdeadbeef)
+		if n != 1 {
+			t.Errorf("took %d completions; one that is not ours has already left the "+
+				"queue and cannot be put back, so the search must stop rather than "+
+				"keep taking", n)
+		}
+	})
+
+	t.Run("a descriptor in no state to be asked", func(t *testing.T) {
+		n := 0
+		reapURB = func(int) (uintptr, error) { n++; return 0, syscall.ENODEV }
+		reapOwn(-1, 0xdeadbeef)
+		if n != 1 {
+			t.Errorf("asked %d times after ENODEV; the descriptor will not answer "+
+				"again and retrying only delays the caller", n)
+		}
+	})
 }
 
 func TestTheKernelsMemoryIsHeldByTheDescriptorNotTheStream(t *testing.T) {
@@ -588,25 +729,10 @@ func TestAStreamReportsWhatTheKernelRefuses(t *testing.T) {
 		}
 	})
 
-	t.Run("a request this stream does not own", func(t *testing.T) {
-		// ⛔ MATCHED BY ADDRESS AND COMPARED AS A NUMBER. The kernel hands back
-		// the pointer it was given; an address no slot owns is a bug somewhere
-		// and is named rather than assumed to be slot zero.
-		f := &fakeStream{t: t, packet: 3072, reapUnknown: true}
-		f.install()
-		s, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), 320, 240)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer s.Close()
-		_, err = s.Frame(streamCtx(t))
-		if err == nil {
-			t.Fatal("Frame accepted a completion from a request it does not own")
-		}
-		if want := "does not own"; !strings.Contains(err.Error(), want) {
-			t.Errorf("Frame = %v, want it to say %q", err, want)
-		}
-	})
+	// ⛔ A COMPLETION THIS STREAM DOES NOT OWN IS NOT A KERNEL REFUSAL, so it is
+	// not here. It used to be — fatal — and that ended the first on-device run;
+	// see TestAForeignCompletionIsSkippedAndCounted for what it does now and
+	// why.
 }
 
 func TestAPacketThisProcessCannotReadIsSkippedRatherThanBlamedOnTheCamera(t *testing.T) {
@@ -661,18 +787,18 @@ func TestANewURBSlotDescribesWhatTheKernelExpects(t *testing.T) {
 	if int(u.Endpoint) != ep.Address {
 		t.Errorf("URB endpoint %#02x, want %#02x", u.Endpoint, ep.Address)
 	}
-	if int(u.NumberOfPackets) != ISOPacketsPerURB {
-		t.Errorf("URB carries %d packets, want %d", u.NumberOfPackets, ISOPacketsPerURB)
+	if int(u.NumberOfPackets) != StreamPacketsPerURB {
+		t.Errorf("URB carries %d packets, want %d", u.NumberOfPackets, StreamPacketsPerURB)
 	}
-	if int(u.BufferLength) != ep.ISOPacketSize()*ISOPacketsPerURB {
+	if int(u.BufferLength) != ep.ISOPacketSize()*StreamPacketsPerURB {
 		t.Errorf("URB buffer is %d bytes, want %d packets of %d",
-			u.BufferLength, ISOPacketsPerURB, ep.ISOPacketSize())
+			u.BufferLength, StreamPacketsPerURB, ep.ISOPacketSize())
 	}
 	if slot.addr != uintptr(unsafe.Pointer(&slot.raw[0])) {
 		t.Error("the slot's remembered address is not its own memory, so no completion " +
 			"will ever match it")
 	}
-	for i := 0; i < ISOPacketsPerURB; i++ {
+	for i := 0; i < StreamPacketsPerURB; i++ {
 		d := (*usbdevfsISOPacketDesc)(unsafe.Pointer(&slot.raw[urbSize+isoPacketSize*i]))
 		if int(d.Length) != ep.ISOPacketSize() {
 			t.Fatalf("packet %d asks for %d bytes, want %d", i, d.Length, ep.ISOPacketSize())

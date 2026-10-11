@@ -100,7 +100,38 @@ type FrameAssembler struct {
 	frames  int
 	dropped int
 	bad     int
+
+	// toggles and eofs count the two things that can END a frame, and short
+	// counts the bytes the dropped ones were missing.
+	//
+	// ⛔⛔ THEY EXIST BECAUSE THE COUNTS DID NOT CLOSE. The first on-device
+	// stream delivered 10 frames and dropped 10, with 7968 packets — about
+	// thirty-one frames' worth of data for twenty frames seen. A census that
+	// does not add up is the finding, and "frames" and "dropped" alone cannot
+	// say WHICH boundary fired or how far short the losers were. Counting per
+	// channel is the only way to tell a camera that splits its frames from a
+	// bus that loses packets.
+	toggles int
+	eofs    int
+	short   int
+	// dropOnEOF and dropOnToggle split the losses by WHICH boundary ended them.
+	//
+	// ⛔⛔ WITHOUT THIS SPLIT THE CENSUS IS AMBIGUOUS. 11 toggles and 11 EOFs
+	// for 22 completions, half of them 8% full, is consistent with two opposite
+	// stories: a camera that sets EOF early (so the EOF ends a fragment and the
+	// toggle ends the real frame) or one that toggles early. They call for
+	// opposite fixes, and one counter each tells them apart.
+	dropOnEOF    int
+	dropOnToggle int
 }
+
+// Why a frame ended, for the per-boundary census.
+type endedBy int
+
+const (
+	endedByToggle endedBy = iota
+	endedByEOF
+)
 
 // MaxFrameBytes is the largest frame this package will assemble.
 //
@@ -145,6 +176,27 @@ func (a *FrameAssembler) Stats() (frames, dropped, bad int) {
 	return a.frames, a.dropped, a.bad
 }
 
+// Boundaries reports how each frame ended and how much the dropped ones were
+// missing: identifier toggles, end-of-frame bits, and the total shortfall in
+// bytes.
+//
+// ⭐ IT IS A CENSUS PER CHANNEL. "frames" and "dropped" cannot say whether a
+// camera split its frames or a bus lost packets — the first shows up as more
+// boundaries than frames, the second as a shortfall spread thinly. Averaging the
+// shortfall over the dropped count says which.
+func (a *FrameAssembler) Boundaries() (toggles, eofs, shortBytes int) {
+	return a.toggles, a.eofs, a.short
+}
+
+// Losses reports which boundary ended the frames that were dropped.
+//
+// ⛔ THE SPLIT IS THE DIAGNOSIS. Equal numbers of toggles and EOFs with half the
+// frames nearly empty fits two opposite stories — a camera setting EOF early, or
+// one toggling early — and they call for opposite fixes.
+func (a *FrameAssembler) Losses() (onToggle, onEOF int) {
+	return a.dropOnToggle, a.dropOnEOF
+}
+
 // Feed takes one payload and returns a whole frame's bytes when one completed.
 //
 // The bytes are BORROWED: they are valid until the next Feed, which starts
@@ -163,11 +215,12 @@ func (a *FrameAssembler) Feed(p UVCPayload) ([]byte, bool) {
 
 	var done []byte
 	if a.open && p.FID() != a.fid {
+		a.toggles++
 		// The frame ended at the previous payload: this one belongs to the
 		// next. ⛔ THE TOGGLE IS THE BOUNDARY, and it is checked BEFORE the
 		// payload is appended — appending first would put the first packet of
 		// the new frame at the end of the old one.
-		done = a.complete()
+		done = a.complete(endedByToggle)
 	}
 	a.fid = p.FID()
 	a.open = true
@@ -180,7 +233,8 @@ func (a *FrameAssembler) Feed(p UVCPayload) ([]byte, bool) {
 		a.buf = append(a.buf, p.Data[:a.want-len(a.buf)]...)
 	}
 	if p.EOF() {
-		if d := a.complete(); d != nil {
+		a.eofs++
+		if d := a.complete(endedByEOF); d != nil {
 			done = d
 		}
 	}
@@ -189,11 +243,17 @@ func (a *FrameAssembler) Feed(p UVCPayload) ([]byte, bool) {
 
 // complete closes the frame being assembled, returning its bytes when it is
 // whole and counting it as dropped when it is not.
-func (a *FrameAssembler) complete() []byte {
+func (a *FrameAssembler) complete(why endedBy) []byte {
 	n := len(a.buf)
 	a.open = false
 	if n < a.want {
 		a.dropped++
+		a.short += a.want - n
+		if why == endedByEOF {
+			a.dropOnEOF++
+		} else {
+			a.dropOnToggle++
+		}
 		a.buf = a.buf[:0]
 		return nil
 	}
@@ -270,11 +330,27 @@ type UVCStreamStats struct {
 	// problems with different fixes, and a single counter would make a slow
 	// tracker look like a failing cable.
 	Late int
+	// Foreign is completions collected from this descriptor that belonged to
+	// some other request.
+	//
+	// ⛔ IT IS COUNTED BECAUSE A COMPLETION QUEUE BELONGS TO THE DESCRIPTOR,
+	// not to whoever submitted. Anything else reading the same device — or, as
+	// happened here, this package's own [USBHandle.SubmitISO] cancelling a test
+	// request without collecting it — puts a completion in the way. Skipping it
+	// is right; skipping it silently would make a stream that is eating other
+	// people's requests look merely slow.
+	Foreign int
 }
 
 // String renders the counters for logs.
 func (s UVCStreamStats) String() string {
-	return fmt.Sprintf("%d frames, %d dropped, %d late, %d bad payloads; "+
+	out := fmt.Sprintf("%d frames, %d dropped, %d late, %d bad payloads; "+
 		"%d packets (%d empty), %d bytes",
 		s.Frames, s.Dropped, s.Late, s.Bad, s.Packets, s.Empty, s.Bytes)
+	if s.Foreign > 0 {
+		// Only when there are any: a counter that is always zero in every log
+		// line teaches readers to skip the line.
+		out += fmt.Sprintf("; %d foreign completion(s)", s.Foreign)
+	}
+	return out
 }
