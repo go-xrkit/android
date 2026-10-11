@@ -278,14 +278,25 @@ func TestTheIoctlsPassTheKernelWhatTheKernelExpects(t *testing.T) {
 	if calls[3].req != usbdevfsDiscardURB {
 		t.Fatalf("the submit was not followed by a discard: %#x", calls[3].req)
 	}
+	// ⛔⛔ AND THE DISCARD IS FOLLOWED BY A REAP, which is the whole lesson of
+	// 2026-10-11: a cancelled request still COMPLETES and still waits in the
+	// descriptor's completion queue. That queue belongs to the descriptor and
+	// not to whoever submitted, so the next reader gets it — and the next reader
+	// was UVCStream.Frame, which stopped on its very first call saying it had
+	// been handed a request it did not own. A question must clear its own litter.
+	if calls[4].req != usbdevfsReapURBNDelay {
+		t.Fatalf("the discard was not followed by a reap: %#x — the cancelled request "+
+			"is left in the queue for whoever reads this descriptor next",
+			calls[4].req)
+	}
 
 	// ⛔ AND CLOSE RELEASES WHAT WAS CLAIMED. An interface left claimed keeps
 	// the kernel's own driver off the camera after this process is gone.
 	if err := h.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if calls[4].req != usbdevfsReleaseInterface {
-		t.Fatalf("Close did not release the claimed interface: %#x", calls[4].req)
+	if calls[5].req != usbdevfsReleaseInterface {
+		t.Fatalf("Close did not release the claimed interface: %#x", calls[5].req)
 	}
 }
 

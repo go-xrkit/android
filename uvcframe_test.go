@@ -296,6 +296,79 @@ func TestAPayloadTheCameraMarksBadAbandonsItsFrame(t *testing.T) {
 	}
 }
 
+// TestTheCensusSaysWHICHBoundaryEndedEachFrame.
+//
+// ⛔⛔ THE TOTALS DID NOT CLOSE ON THE DEVICE AND THAT IS WHY THIS EXISTS.
+// The first streaming run delivered 10 frames and dropped 10, with about
+// thirty-one frames' worth of packets for twenty frames seen. "frames" and
+// "dropped" cannot say which boundary fired, and 11 toggles with 11 EOFs fits
+// two opposite stories. Splitting the losses by boundary settled it in one run:
+// 12 losses on toggles, 2 on EOFs — the camera sends same-identifier packets
+// after its end-of-frame bit.
+func TestTheCensusSaysWHICHBoundaryEndedEachFrame(t *testing.T) {
+	const w, h = 320, 2
+	a, err := NewFrameAssembler(w, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole := w * h * BytesPerPixelYUY2
+
+	// A whole frame ended by EOF: delivered, and counted as an EOF boundary.
+	feedFrame(t, a, false, 0x11, whole-128, 256)
+	last := make([]byte, 128)
+	p, err := ParsePayload(payload(2, payloadEOF, last...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.Feed(p); !ok {
+		t.Fatal("a whole frame ended by EOF was not delivered")
+	}
+
+	// Then the device's own misbehaviour: more packets with the SAME
+	// identifier, which open a frame that only the toggle can end.
+	feedFrame(t, a, false, 0x22, 256, 256)
+	feedFrame(t, a, true, 0x33, 256, 256) // the toggle, ending a 256-byte fragment
+
+	tg, eo, short := a.Boundaries()
+	if tg != 1 || eo != 1 {
+		t.Errorf("Boundaries = %d toggle(s), %d EOF(s); want one of each", tg, eo)
+	}
+	if want := whole - 256; short != want {
+		t.Errorf("the shortfall is %d bytes, want %d — the fragment held 256 of %d",
+			short, want, whole)
+	}
+	onT, onE := a.Losses()
+	if onT != 1 || onE != 0 {
+		t.Errorf("Losses = %d on toggle, %d on EOF; want the loss attributed to the "+
+			"TOGGLE, which is the boundary firing where it should not", onT, onE)
+	}
+	if f, d, _ := a.Stats(); f != 1 || d != 1 {
+		t.Errorf("Stats = %d frames, %d dropped; want 1 and 1", f, d)
+	}
+}
+
+// And the mirror image, so the split is not merely always-toggle.
+func TestALossOnAnEndOfFrameBitIsAttributedToIt(t *testing.T) {
+	a, err := NewFrameAssembler(320, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Half a frame, then EOF: the camera marked the end early.
+	feedFrame(t, a, false, 0x44, 256, 256)
+	p, err := ParsePayload(payload(2, payloadEOF))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.Feed(p); ok {
+		t.Fatal("a frame a quarter full was delivered")
+	}
+	onT, onE := a.Losses()
+	if onT != 0 || onE != 1 {
+		t.Errorf("Losses = %d on toggle, %d on EOF; want it attributed to the EOF",
+			onT, onE)
+	}
+}
+
 func TestDecodeWritesLuminanceIntoEveryChannel(t *testing.T) {
 	// ⭐ GREY IS NOT A SHORTCUT HERE: headflow.Profile sums R+G+B down each
 	// column, so a grey image carries exactly what it reads and a full YUV
@@ -375,6 +448,17 @@ func TestStreamStatsSayWhatHappened(t *testing.T) {
 	s := UVCStreamStats{
 		Packets: 900, Empty: 700, Bytes: 614400,
 		Frames: 2, Dropped: 1, Bad: 3, Late: 4,
+	}
+	// ⛔ A COUNTER THAT IS ALWAYS ZERO IN EVERY LINE TEACHES READERS TO SKIP THE
+	// LINE, so Foreign appears only when there is one — and both halves of that
+	// are asserted.
+	if got := s.String(); strings.Contains(got, "foreign") {
+		t.Errorf("String() mentions foreign completions when there were none: %q", got)
+	}
+	withForeign := s
+	withForeign.Foreign = 7
+	if got := withForeign.String(); !strings.Contains(got, "7 foreign completion(s)") {
+		t.Errorf("String() = %q, missing the foreign completions", got)
 	}
 	got := s.String()
 	// ⭐ Late AND Dropped ARE BOTH NAMED, because they are different problems:

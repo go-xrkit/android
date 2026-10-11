@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -284,6 +285,45 @@ func (h *USBHandle) SetAltSetting(iface, alt int) error {
 // It does not reap the result: a submission that the kernel ACCEPTS has already
 // answered the question, and waiting for pixels would confuse "the transfer was
 // allowed" with "the camera was streaming", which are different findings.
+// ReapTries bounds how long [USBHandle.SubmitISO] waits to collect the request
+// it cancelled.
+//
+// ⚠ IT IS A BOUND, NOT A TIMEOUT TO TUNE. A cancelled isochronous request
+// completes within a frame — a millisecond at high speed — so a handful of
+// tries is already generous. What the bound is really for is the case where it
+// never comes back at all: waiting forever there would hang a probe on a
+// question it has already answered.
+const ReapTries = 64
+
+// reapOwn collects one specific request from the descriptor's completion queue,
+// leaving anybody else's where it found it.
+//
+// ⛔ A COMPLETION QUEUE BELONGS TO THE DESCRIPTOR AND NOT TO WHOEVER SUBMITTED.
+// Reaping is "give me the next finished request", so a caller that reaps
+// indiscriminately takes other readers' completions off the queue and loses
+// them. Anything this does not recognise is therefore PUT BACK by not taking
+// it — which the kernel does not allow — so instead it is reported to nobody
+// and the search simply ends: better to leave one of ours behind than to
+// swallow one of theirs. In practice nothing else of ours is outstanding when
+// this runs, because SubmitISO holds the handle's lock.
+func reapOwn(fd int, want uintptr) {
+	for i := 0; i < ReapTries; i++ {
+		got, err := reapURB(fd)
+		switch {
+		case err == nil && got == want:
+			return
+		case err == nil:
+			// Somebody else's. It has already left the queue and there is no
+			// way to return it; stop rather than keep taking.
+			return
+		case errors.Is(err, syscall.EAGAIN):
+			time.Sleep(time.Millisecond)
+		default:
+			return // the descriptor is in no state to be asked again
+		}
+	}
+}
+
 func (h *USBHandle) SubmitISO(endpoint USBEndpoint) error {
 	typ := urbTypeFor(endpoint.Type())
 	// ⛔ THE DECODED SIZE, NOT THE RAW FIELD. See USBEndpoint.ISOPacketSize:
@@ -325,6 +365,24 @@ func (h *USBHandle) SubmitISO(endpoint USBEndpoint) error {
 	// it, and leaving a request outstanding against a camera nobody is reading
 	// would stream into a buffer this process is about to drop.
 	_ = ioctl(h.fd, usbdevfsDiscardURB, unsafe.Pointer(&raw[0]))
+	// ⛔⛔ AND REAP IT, BECAUSE DISCARDING DOES NOT REMOVE IT FROM THE QUEUE.
+	// A cancelled request still completes — with a status, usually -ECONNRESET —
+	// and waits in the descriptor's completion queue for somebody to collect it.
+	// The queue belongs to the DESCRIPTOR, not to whoever submitted, so the next
+	// reaper gets it. That next reaper was [UVCStream.Frame], which rightly said
+	// it had been handed a request it did not own and stopped on its very first
+	// call:
+	//
+	//	STEP 8 stream   0 frame(s) in 0s, 0 packets
+	//	STOPPED BY: … completed a request at 0x79f466a000 that this stream
+	//	            does not own
+	//
+	// Measured on a Pixel 11 Pro Fold, 2026-10-11. The probe before this one
+	// read that as a silent camera, which it was not: this question had left
+	// its own litter in the way of the answer.
+	reapOwn(h.fd, uintptr(unsafe.Pointer(&raw[0])))
+	runtime.KeepAlive(buf)
+	runtime.KeepAlive(raw)
 	// buf and raw must outlive the ioctls above, and nothing else refers to
 	// them; naming them here is what keeps the compiler from deciding
 	// otherwise.

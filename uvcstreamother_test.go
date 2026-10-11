@@ -56,6 +56,13 @@ func TestAStubStreamAnswersAsAStoppedOneWould(t *testing.T) {
 	if got := s.Negotiation(); got != neg {
 		t.Errorf("Negotiation = %+v, want what it was built with", got)
 	}
+	// ⛔ nil, NOT AN EMPTY ASSEMBLER. One with no frames in it reads as a camera
+	// that delivered nothing, which is a different statement from "there is no
+	// camera on this platform" — and a caller printing a census would publish
+	// the first while meaning the second.
+	if got := s.Assembler(); got != nil {
+		t.Errorf("Assembler = %v, want nil where there is no stream", got)
+	}
 	// Close is idempotent here too, because a caller's deferred Close does not
 	// know which platform it is on.
 	if err := s.Close(); err != nil {

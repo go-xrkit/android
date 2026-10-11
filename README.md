@@ -916,10 +916,10 @@ every size is the better answer.
 
 ### What is written, and what is not
 
-`cmd/xrusb` and the layer under it go as far as "the kernel accepts the
-request", and then one step further, **to frames** — see the stream below for
-what that step does and does not prove. The parts most likely to be silently
-wrong are pinned:
+`cmd/xrusb` and the layer under it go from "the kernel accepts the request" all
+the way **to pixels on an unrooted phone** — measured, see the stream below,
+where the frame rate that remains short of the camera's own is also recorded.
+The parts most likely to be silently wrong are pinned:
 
 - the **ioctl numbers are computed** from this package's own mirrors of the
   kernel's structs, and the suite asserts the results against the values
@@ -984,15 +984,90 @@ Two things the device chooses rather than this process, and so are bounded:
   anything else happens. `MaxFrameBytes` refuses it, with the check written as a
   division because the product it guards against is the one that overflows.
 
-⚠ **What is measured, and what is not.** Both lanes are at 100 % statement
-coverage and race-clean, a fake camera drives the whole path from packets to
-pixels, and `cmd/xrusb` reports the **luminance spread** of the middle row
-rather than a frame count — because a black frame looks exactly like a working
-stream to a counter, which is this file's oldest trap. But the on-device run has
-**not** happened: the phone was behind its lock screen, where Android does not
-credit the application as foreground and refuses its own service start. So "the
-camera's pixels reach a CGO-free Go process" is still the agreement of the
-kernel and the camera, not a witnessed picture.
+### ⭐⭐ The pixels arrive — measured on the device, 2026-10-11
+
+```
+STEP 7b alternate 5          OK — 2400 bytes an interval for a 2400-byte payload
+STEP 8 stream                10 frame(s) in 1.061s
+    10 frames, 12 dropped, 0 late, 0 bad payloads; 8232 packets (0 empty), 6846160 bytes
+ANSWER 10 WHOLE FRAMES at 9.42 fps, luminance 7..57
+```
+
+Pixel 11 Pro Fold, VITURE Beast, **no root**. The **luminance spread** is
+reported rather than the frame count because a black frame looks exactly like a
+working stream to a counter — four runs gave 7..58, 6..57, 7..56 and 7..57, so
+there is a picture and it is stable.
+
+Three defects stood between the agreement and the picture, and each one took the
+measurement to find:
+
+⛔⛔ **A cancelled request still completes, and still waits in the queue.** The
+first run reported `0 frame(s) in 0s — 0 packets` and the verdict read that as a
+silent camera. It was not: step 4's own `SubmitISO` discards its test request
+without collecting it, the completion queue belongs to the **descriptor** rather
+than to whoever submitted, and the stream picked that orphan up on its first
+reap:
+
+```
+STOPPED BY: … completed a request at 0x79f466a000 that this stream does not own
+```
+
+A question has to clear away its own litter, which `reapOwn` now does. And the
+stream *skips and counts* a foreign completion instead of dying on it, because
+one stray request from anything else reading the same device must not end a
+working camera.
+
+⛔⛔ **The alternate setting goes AFTER the commit, not before.** With it selected
+first the camera sent nothing for fifteen seconds while the bus cheerfully
+delivered **119 464 empty packets** — one request a millisecond, exactly the
+isochronous schedule, and no data at all. UVC takes the move *away* from the
+zero-bandwidth alternate, following a commit, as the signal to start sending;
+arriving there beforehand means that signal never happens. It is the order the
+kernel's own `uvcvideo` uses. `PickAlternate` then takes the **smallest
+alternate that fits** the committed payload — alternate 5, 2400 bytes for a
+2400-byte payload, where the old code reserved 3072 bytes of every microframe to
+carry the same thing.
+
+⛔ **And a `break` that dropped its error cost a cycle on its own.** `0 packets
+in 0s` is not a quiet camera: a quiet one still has its endpoint scheduled and
+still fills the wait. The reason was sitting in a discarded variable. The probe
+prints it now, and switches on the errno.
+
+### ⚠ The frame rate is 9.4 and not 25 — localised, not fixed
+
+Twelve frames are dropped for every ten delivered. The per-boundary census says
+exactly where:
+
+```
+boundaries: 11 toggle(s), 11 EOF bit(s); the dropped frames were short by
+            564118 bytes each on average of a 614400-byte frame
+the losses ended on: 11 toggle(s), 1 EOF bit(s)
+```
+
+Every loss ends on a **FID toggle** and almost none on an EOF. So the
+end-of-frame bit is ending the real frames correctly, and the camera is sending
+same-identifier packets *after* it — opening a frame that only the next toggle
+can close, 8 % full, which is then rightly dropped. **That is the open
+question**, and the census is what turns it from "slow" into something with an
+address.
+
+⭐ **The ring depth is not the cause, and a control says so rather than a story.**
+Deepening it looked obviously right: a 640×480 YUY2 frame at 2400 bytes an
+interval takes 32 ms, while four 8-packet requests cover four. Measured:
+
+| requests × packets | packets/s | whole frames |
+|---|---|---|
+| 4 × 8 | 7744 | 10 |
+| 16 × 8 | 7968 | 10 |
+| 4 × 32 | **480** | **0** |
+
+Thirty-two packets a request made the camera stop sending altogether — 480
+packets in fifteen seconds, carrying eleven bytes each. Putting 8 back with the
+device in the same state streamed again immediately, which is what makes the
+ring the cause of that collapse and not the phone's leftover state.
+
+Both lanes are at 100 % statement coverage and race-clean, and a fake camera
+drives the whole path from packets to pixels off the device.
 
 ⛔ That lock screen cost three measurement cycles, every one of them at the end
 of a build. It is now read **before** anything is built — `tools/xrrun` asks

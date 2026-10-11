@@ -23,8 +23,14 @@ import (
 // ⛔ ONE IS NOT ENOUGH, AND THAT IS NOT A TUNING CHOICE. An isochronous
 // endpoint is scheduled every microframe whether anybody is listening: between
 // reaping one request and submitting the next, the camera's packets go nowhere.
-// With [ISOPacketsPerURB] packets a request, each covers a millisecond, so four
-// in flight leave three outstanding while one is being emptied.
+//
+// ⚠ AND FOUR IS WHERE MEASUREMENT LEFT IT, not where arithmetic wanted it. Four
+// requests of [StreamPacketsPerURB] packets cover four milliseconds, while a
+// 640x480 YUY2 frame at 2400 bytes an interval takes thirty-two — so deepening
+// the ring looked obviously right. Sixteen requests delivered exactly the same
+// 10 frames (7968 packets against 7744), and raising the packets per request
+// instead made the camera stop sending altogether. The ring depth is not what
+// bounds this; see [StreamPacketsPerURB] for the numbers and the control.
 const StreamURBs = 4
 
 // A UVCStream is a running camera.
@@ -54,7 +60,7 @@ type UVCStream struct {
 	//
 	// ⛔⛔ ONE REQUEST CAN COMPLETE TWO FRAMES, AND RETURNING ONLY THE LAST
 	// LOSES THE OTHER WHILE STILL COUNTING IT. A request carries
-	// ISOPacketsPerURB packets; a frame small enough to fit in fewer than that
+	// StreamPacketsPerURB packets; a frame small enough to fit in fewer than that
 	// finishes twice inside one drain, and the first version of this code
 	// overwrote `frame` — so Stats said two frames and the caller got one. It
 	// does not happen at 640x480, where a frame is some two hundred packets,
@@ -74,6 +80,7 @@ type UVCStream struct {
 	packets int
 	bytes   int
 	empty   int
+	foreign int
 }
 
 // urbSlot is one request and the memory it names.
@@ -123,7 +130,7 @@ func (h *USBHandle) Stream(neg UVCNegotiation, ep USBEndpoint, w, h2 int) (*UVCS
 
 // newURBSlot allocates one request.
 func newURBSlot(ep USBEndpoint, packet int) *urbSlot {
-	n := ISOPacketsPerURB
+	n := StreamPacketsPerURB
 	s := &urbSlot{
 		buf: make([]byte, packet*n),
 		raw: make([]byte, urbSize+isoPacketSize*n),
@@ -217,9 +224,9 @@ func (s *UVCStream) Frame(ctx context.Context) (*image.RGBA, error) {
 		}
 		if slot == nil {
 			// Nothing has completed. ⚠ THE SLEEP IS THE SCHEDULE, not a
-			// guess: at ISOPacketsPerURB packets a request each request covers
-			// a millisecond, so there is nothing to collect sooner and a busy
-			// loop would burn a core to learn that.
+			// guess: at StreamPacketsPerURB packets a request each request
+			// covers four milliseconds, so there is nothing to collect sooner
+			// and a busy loop would burn a core to learn that.
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -254,8 +261,21 @@ func (s *UVCStream) reap() (*urbSlot, error) {
 			return slot, nil
 		}
 	}
-	return nil, fmt.Errorf("android: %s completed a request at %#x that this stream does "+
-		"not own", s.h.name, p)
+	// ⛔⛔ A COMPLETION THIS STREAM DOES NOT OWN IS SKIPPED, NOT FATAL. It was
+	// fatal, and that killed the first on-device run on its FIRST call: the
+	// probe's own SubmitISO had cancelled a test request without reaping it, and
+	// a cancelled request still completes and still waits in the queue. That
+	// particular litter is cleaned up now — see reapOwn — but the lesson is
+	// structural: the completion queue belongs to the DESCRIPTOR, so anything
+	// else reading the same device lands here, and one stray request must not
+	// end a working camera.
+	//
+	// It is COUNTED, because the alternative to fatal is not silence: a stream
+	// quietly eating foreign completions would look like a slow camera.
+	s.mu.Lock()
+	s.foreign++
+	s.mu.Unlock()
+	return nil, nil
 }
 
 // drain reads one completed request's packets into the assembler, queueing
@@ -263,7 +283,7 @@ func (s *UVCStream) reap() (*urbSlot, error) {
 func (s *UVCStream) drain(slot *urbSlot) {
 	off := 0
 	packet := s.ep.ISOPacketSize()
-	for i := 0; i < ISOPacketsPerURB; i++ {
+	for i := 0; i < StreamPacketsPerURB; i++ {
 		d := (*usbdevfsISOPacketDesc)(unsafe.Pointer(&slot.raw[urbSize+isoPacketSize*i]))
 		n := int(d.ActualLength)
 		pkt := slot.buf[off : off+min(n, packet)]
@@ -314,12 +334,16 @@ func (s *UVCStream) Stats() UVCStreamStats {
 	f, d, b := s.asm.Stats()
 	return UVCStreamStats{
 		Packets: s.packets, Empty: s.empty, Bytes: s.bytes,
-		Frames: f, Dropped: d, Bad: b, Late: s.late,
+		Frames: f, Dropped: d, Bad: b, Late: s.late, Foreign: s.foreign,
 	}
 }
 
 // Negotiation is what the camera agreed to for this stream.
 func (s *UVCStream) Negotiation() UVCNegotiation { return s.neg }
+
+// Assembler is the frame assembler this stream feeds, for the counters that
+// describe HOW frames ended rather than how many did.
+func (s *UVCStream) Assembler() *FrameAssembler { return s.asm }
 
 // Close cancels every outstanding request. It is idempotent.
 //

@@ -132,45 +132,32 @@ func run(ctx context.Context, args []string) int {
 	}
 	say("STEP 3 claim interface %d     OK — taken from whatever driver held it", iface.Number)
 
-	if err := h.SetAltSetting(iface.Number, iface.Alternate); err != nil {
-		say("STOPPED at set-alternate: %v", err)
-		say("RESULT the bandwidth could not be reserved; an isochronous endpoint has none " +
-			"until its alternate is selected, so the transfer below could not work anyway")
+	// ⛔⛔ ALTERNATE 0 HERE, AND THE OPERATING ONE ONLY AFTER THE COMMIT. This
+	// probe selected the streaming alternate FIRST and then negotiated, and the
+	// camera sent nothing at all for fifteen seconds while the bus happily
+	// delivered empty packets:
+	//
+	//	STEP 8 stream   0 frame(s) in 15s
+	//	    119464 packets (119464 empty), 0 bytes
+	//
+	// Measured on a Pixel 11 Pro Fold, 2026-10-11. The plumbing was never the
+	// problem — 119464 packets in 15s is one request a millisecond, exactly the
+	// isochronous schedule. UVC takes the move AWAY from the zero-bandwidth
+	// alternate, after a commit, as the signal to start sending; arriving there
+	// before the commit means that signal never happens. It is the order the
+	// kernel's own uvcvideo uses, and the order this package now documents.
+	if err := h.SetAltSetting(iface.Number, android.ZeroBandwidthAlternate); err != nil {
+		say("STOPPED at set-alternate 0: %v", err)
+		say("RESULT the interface could not be parked at zero bandwidth, which is where " +
+			"UVC requires it to sit while it is negotiated")
 		return 1
 	}
-	say("STEP 4 select alternate %d    OK — bandwidth reserved", iface.Alternate)
+	say("STEP 4 park at alternate %d   OK — zero bandwidth, ready to negotiate",
+		android.ZeroBandwidthAlternate)
 
-	// ⛔ THE QUESTION. Everything above is ordinary; this is the part Android's
-	// Java API cannot do at all and that nothing documents for usbfs.
-	say("")
-	if err := h.SubmitISO(ep); err != nil {
-		// ⛔⛔ A MALFORMED REQUEST IS NOT A REFUSAL, AND THIS SAID IT WAS. The
-		// first run printed "the kernel refused" on EMSGSIZE, which came from
-		// passing wMaxPacketSize where the bytes-per-interval belonged — our
-		// own bug, announced as the platform's verdict. The errno is the only
-		// thing that tells the two apart, so it decides what this prints.
-		switch {
-		case errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EACCES):
-			say("ANSWER NO — the kernel REFUSED the isochronous request: %v", err)
-			say("RESULT an ordinary application may not read this camera by any route: " +
-				"camera2 does not offer it, UsbDeviceConnection cannot submit " +
-				"isochronous transfers, and usbfs refuses them here too.")
-		default:
-			say("ANSWER UNKNOWN — not accepted, and NOT because it was refused: %v", err)
-			say("RESULT that is a malformed request rather than a verdict. EMSGSIZE, "+
-				"EINVAL and ENODEV all come from WHAT WAS ASKED rather than from "+
-				"whether it was allowed. The endpoint carries %d bytes an interval "+
-				"(wMaxPacketSize %d decoded); fix the request and ask again.",
-				ep.ISOPacketSize(), ep.MaxPacketSize)
-		}
-		return 1
-	}
-	say("ANSWER YES — the kernel ACCEPTED an isochronous request on endpoint %#02x",
-		ep.Address)
-
-	// ⭐ AND THEN ASK THE CAMERA ITSELF. Everything above was the kernel
-	// agreeing to carry bytes; this is the device agreeing to produce them, and
-	// it is a separate question with a separate answer.
+	// ⭐ ASK THE CAMERA ITSELF, WITH THE INTERFACE PARKED. Everything below is
+	// control transfers: the device agreeing to produce bytes, which is a
+	// separate question from the kernel agreeing to carry them.
 	say("")
 	formats, ferr := desc.UVCFormats(iface.Number)
 	if ferr != nil {
@@ -201,6 +188,61 @@ func run(ctx context.Context, args []string) int {
 	if neg.Changed() {
 		say("⚠ THE CAMERA CHANGED THE TERMS. It is entitled to, and what it answered is " +
 			"what will arrive — not what was asked for.")
+	}
+
+	// ⛔⛔ NOW the operating alternate, chosen from what was COMMITTED. The
+	// smallest that carries the payload: an alternate holds bus bandwidth for as
+	// long as it is selected, and this camera's largest offers 3072 bytes an
+	// interval to carry 2400.
+	ifaces, ierr := desc.Interfaces()
+	if ierr != nil {
+		say("STEP 7b alternate            FAILED reading the interfaces again: %v", ierr)
+		return 1
+	}
+	alt, aep, ok := android.PickAlternate(ifaces, iface.Number, neg.MaxPayload)
+	if !ok {
+		say("STEP 7b alternate            FAILED: no alternate of interface %d carries "+
+			"%d bytes an interval", iface.Number, neg.MaxPayload)
+		return 1
+	}
+	if err := h.SetAltSetting(alt.Number, alt.Alternate); err != nil {
+		say("STEP 7b alternate            FAILED: %v", err)
+		say("RESULT the bandwidth could not be reserved; an isochronous endpoint has none " +
+			"until its alternate is selected, so nothing could arrive anyway")
+		return 1
+	}
+	say("STEP 7b alternate %d          OK — %d bytes an interval for a %d-byte payload",
+		alt.Alternate, aep.ISOPacketSize(), neg.MaxPayload)
+	ep = aep
+
+	// ⛔ THE QUESTION. Everything above is ordinary; this is the part Android's
+	// Java API cannot do at all and that nothing documents for usbfs.
+	say("")
+	if err := h.SubmitISO(ep); err != nil {
+		// ⛔⛔ A MALFORMED REQUEST IS NOT A REFUSAL, AND THIS SAID IT WAS. The
+		// first run printed "the kernel refused" on EMSGSIZE, which came from
+		// passing wMaxPacketSize where the bytes-per-interval belonged — our
+		// own bug, announced as the platform's verdict. The errno is the only
+		// thing that tells the two apart, so it decides what this prints.
+		switch {
+		case errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EACCES):
+			say("ANSWER NO — the kernel REFUSED the isochronous request: %v", err)
+			say("RESULT an ordinary application may not read this camera by any route: " +
+				"camera2 does not offer it, UsbDeviceConnection cannot submit " +
+				"isochronous transfers, and usbfs refuses them here too.")
+		default:
+			say("ANSWER UNKNOWN — not accepted, and NOT because it was refused: %v", err)
+			say("RESULT that is a malformed request rather than a verdict. EMSGSIZE, "+
+				"EINVAL and ENODEV all come from WHAT WAS ASKED rather than from "+
+				"whether it was allowed. The endpoint carries %d bytes an interval "+
+				"(wMaxPacketSize %d decoded); fix the request and ask again.",
+				ep.ISOPacketSize(), ep.MaxPacketSize)
+		}
+		return 1
+	}
+	say("ANSWER YES — the kernel ACCEPTED an isochronous request on endpoint %#02x",
+		ep.Address)
+	{
 	}
 
 	// ⛔ AND NOW THE ONLY QUESTION THAT WAS EVER WORTH ASKING: do pixels
@@ -236,9 +278,17 @@ func stream(ctx context.Context, h *android.USBHandle, neg android.UVCNegotiatio
 	start := time.Now()
 	var lo, hi byte = 255, 0
 	got := 0
+	// ⛔⛔ THE ERROR IS KEPT, BECAUSE A break THAT DROPS IT COST A MEASUREMENT.
+	// The first run of this step reported "0 frame(s) in 0s — 0 packets" and the
+	// verdict read that as a silent camera. It was not: Frame had failed on its
+	// FIRST call and the reason went into a discarded variable. Zero packets in
+	// zero seconds cannot be a camera that is merely quiet — a quiet one still
+	// has its endpoint scheduled and still fills the wait.
+	var stopped error
 	for got < want {
 		img, err := s.Frame(rctx)
 		if err != nil {
+			stopped = err
 			break
 		}
 		got++
@@ -254,7 +304,46 @@ func stream(ctx context.Context, h *android.USBHandle, neg android.UVCNegotiatio
 	st := s.Stats()
 	say("STEP 8 stream                %d frame(s) in %s", got, elapsed.Round(time.Millisecond))
 	say("    %s", st)
+	// ⛔⛔ THE CENSUS PER CHANNEL, because the totals did not close: 10 frames
+	// delivered, 10 dropped, and 7968 packets — about thirty-one frames' worth
+	// of data for twenty frames seen. Which boundary fired, and how far short
+	// the losers were, is the difference between a camera that splits its frames
+	// and a bus that loses packets.
+	if tg, eo, sh := s.Assembler().Boundaries(); tg+eo+sh > 0 {
+		avg := 0
+		if st.Dropped > 0 {
+			avg = sh / st.Dropped
+		}
+		say("    boundaries: %d toggle(s), %d EOF bit(s); the dropped frames were short "+
+			"by %d bytes in all, %d each on average of a %d-byte frame",
+			tg, eo, sh, avg, size.Width*size.Height*android.BytesPerPixelYUY2)
+		onT, onE := s.Assembler().Losses()
+		say("    the losses ended on: %d toggle(s), %d EOF bit(s) — whichever is the "+
+			"larger is the boundary firing where it should not", onT, onE)
+	}
+	if stopped != nil {
+		say("    STOPPED BY: %v", stopped)
+		switch {
+		case errors.Is(stopped, context.DeadlineExceeded):
+			say("    — the wait ran out, which is the camera being slow or silent " +
+				"rather than anything refusing")
+		case errors.Is(stopped, syscall.ENODEV):
+			say("    — ENODEV: the device went away mid-stream. On this phone that is " +
+				"what unplugging looks like, and also what a host that dropped its " +
+				"UsbDeviceConnection looks like")
+		case errors.Is(stopped, syscall.EINVAL):
+			say("    — EINVAL: the kernel accepted the submit and refuses the reap, " +
+				"which points at the request's own shape rather than at the camera")
+		}
+	}
 
+	if got == 0 && stopped != nil && st.Packets == 0 {
+		say("ANSWER NOT A SILENT CAMERA — no packet was collected at all, in no time, "+
+			"so nothing was waited for. The stream stopped on its own first call: "+
+			"%v. A camera that was merely quiet would still have its endpoint "+
+			"scheduled and would still fill the wait with empty packets.", stopped)
+		return 1
+	}
 	if got == 0 {
 		say("ANSWER NO PIXELS — the camera agreed to a format and delivered no whole " +
 			"frame. The packet and byte counts above say whether anything arrived at " +

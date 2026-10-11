@@ -290,6 +290,35 @@ func (d USBDescriptors) Interfaces() ([]USBInterface, error) {
 // that failed for being large would answer a different question.
 const ISOPacketsPerURB = 8
 
+// StreamPacketsPerURB is how many isochronous packets one STREAMING request
+// carries, which is a different question and needs a different answer.
+//
+// ⛔⛔ IT IS 8 BECAUSE 32 WAS MEASURED AND WAS WORSE, which is the opposite of
+// what the arithmetic predicted. A 640x480 YUY2 frame at the committed 2400
+// bytes an interval takes 256 intervals — 32 milliseconds — so a deeper ring
+// looked obviously right. On a Pixel 11 Pro Fold, 2026-10-11, with
+// [StreamURBs] held at 4:
+//
+//	8 packets   7744 packets/s, 6.24 MB, 10 frames   ← this
+//	32 packets    480 packets/s, 5.4 KB,  0 frames   collapsed
+//
+// 480 packets in fifteen seconds is one request a SECOND where the schedule
+// gives one a millisecond, and the packets that did arrive carried 11 bytes
+// each: the camera stopped sending. Raising [StreamURBs] to 16 at 8 packets
+// changed nothing either (7968 packets, same 10 frames), so the ring depth is
+// not what bounds this.
+//
+// ⚠ A CONTROL SAYS SO RATHER THAN A STORY: the previous run had left the
+// interface detached, so two things differed at once. Putting 8 back with that
+// same device state streamed again immediately — which is what makes the ring
+// the cause and not the phone.
+//
+// The frame-rate deficit that remains has a different cause, localised by the
+// per-boundary census in [FrameAssembler.Losses]: every dropped frame ends on a
+// FID toggle and almost none on an EOF, so the camera is sending same-identifier
+// packets AFTER its end-of-frame bit. That is still open.
+const StreamPacketsPerURB = 8
+
 // The usbfs structures, mirroring include/uapi/linux/usbdevice_fs.h.
 //
 // ⛔ THE LAYOUT IS THE CONTRACT. These cross into the kernel by address, so a
