@@ -864,6 +864,56 @@ measurement is simpler and more final than that.
 The first three are measured refusals and stand. The fourth is the one that
 works, and it took three self-inflicted walls to find.
 
+### The camera agrees to a format: 640×480 YUY2 at 25 fps
+
+```go
+formats, _ := desc.UVCFormats(iface.Number)   // the class descriptors, which no
+                                              // general USB parser reports
+want, size, _ := android.PickFormat(formats)
+neg, _ := h.Negotiate(iface.Number, want, size)
+```
+
+Measured on the device:
+
+```
+STEP 5 read formats          OK — 2 format(s) on interface 1
+STEP 6 pick                  YUY2 640x480 @25fps (interval 400000)
+STEP 7 negotiate             OK — format 2 frame 6 interval 400000 (25fps) payload 2400
+```
+
+⛔ **`Negotiate` returns what the camera AGREED TO, not what it was asked.** A
+UVC device may answer a probe with another frame or another interval and the
+host is expected to accept it; `UVCNegotiation.Changed` says when that happened.
+Reporting the request as the outcome is how a stream comes out at a rate nobody
+chose. This camera agreed exactly, so that branch is exercised against a **fake**
+one in the suite — the real device could not reach it.
+
+### ⛔⛔ And the frame was chosen the wrong way round first
+
+`PickFormat` took the **largest** frame, reasoning that more pixels across means
+more to match a column profile on. The camera's own table says what that costs:
+
+| | |
+|---|---|
+| **MJPEG** | **30 fps at every size**, 1920×1080 down to 160×120 |
+| **YUY2** | 1920×1080 @5 fps · 1280×720 @10 · 800×600 @20 · 640×480 @25 |
+
+So "largest" chose 1920×1080 at **five frames a second** — 200 ms a frame, worse
+than the 46–107 ms the same algorithm already achieves on macOS, for a precision
+nothing here uses. **Latency is what head tracking is bounded by**: `headflow`'s
+own documentation says 1:1 locking wants under 20 ms, and choosing which screen
+somebody faces is comfortable at 107 ms. It bins columns four wide, so 640
+across is already 160 bins.
+
+`Fastest` now maximises the frame rate at or above `MinTrackingWidth`, and the
+pick is **25 fps instead of 5**.
+
+⚠ **MJPEG is faster on this camera and is not chosen**, which is a statement
+about the code rather than the hardware: there is no JPEG decode in the frame
+path yet, and YUY2 needs none — every other byte *is* the luminance, which is
+all `headflow.Profile` reads. The day that decode exists, MJPEG's 30 fps at
+every size is the better answer.
+
 ### What is written, and what is not
 
 `cmd/xrusb` and the layer under it go as far as "the kernel accepts the
@@ -885,10 +935,11 @@ request". The parts most likely to be silently wrong are pinned:
 - the descriptors are read with `pread(2)` **on the lent descriptor**, never by
   reopening a path to it.
 
-What is **not** written: the UVC probe/commit negotiation, frame assembly from
-the packet descriptors, and format decoding. `go-xrkit/xrkit/headflow` is
-waiting behind them, already measured at 1.14 % residual — so the remaining work
-is ordinary, with no platform question left in it.
+What is **not** written: the STREAM. Reaping the requests, assembling payloads
+into frames, and handing them to `go-xrkit/xrkit/headflow`, which is waiting
+behind them already measured at 1.14 % residual. The negotiation IS written and
+the camera has committed, so the remaining work is ordinary, with no platform
+question left in it.
 
 ## Input
 
