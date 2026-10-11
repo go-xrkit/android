@@ -100,6 +100,11 @@ var (
 	// direction bits are part of the number: getting them wrong names a
 	// different command rather than failing.
 	usbdevfsIoctl = ioc(iocRead|iocWrite, 18, ioctlArgSize)
+
+	// usbdevfsControl performs one control transfer, which is how a UVC device
+	// is asked what it can do and told what to do: the whole probe/commit
+	// negotiation is control transfers on the streaming interface.
+	usbdevfsControl = ioc(iocRead|iocWrite, 0, ctrlTransferSize)
 )
 
 // The codes carried INSIDE usbdevfsIoctl. They are values in a struct rather
@@ -300,6 +305,23 @@ type (
 		AltSetting uint32
 	}
 
+	// usbdevfsCtrlTransfer is struct usbdevfs_ctrltransfer.
+	//
+	// ⛔ THE POINTER IS ALIGNED, AND THAT IS IN THE SIZE. The six fields before
+	// it come to twelve bytes; the pointer sits at sixteen on a 64-bit kernel,
+	// making the struct twenty-four rather than twenty. The ioctl number
+	// carries that size, so a mirror that packed it tightly would name a
+	// different command.
+	usbdevfsCtrlTransfer struct {
+		RequestType uint8
+		Request     uint8
+		Value       uint16
+		Index       uint16
+		Length      uint16
+		Timeout     uint32
+		Data        uintptr
+	}
+
 	// usbdevfsIoctlArg is struct usbdevfs_ioctl: an ioctl addressed to one
 	// interface's driver rather than to the device.
 	usbdevfsIoctlArg struct {
@@ -345,3 +367,37 @@ const (
 	isoPacketSize    = int(unsafe.Sizeof(usbdevfsISOPacketDesc{}))
 	ioctlArgSize     = int(unsafe.Sizeof(usbdevfsIoctlArg{}))
 )
+
+// ctrlTransferSize is the size the control ioctl's number carries.
+const ctrlTransferSize = int(unsafe.Sizeof(usbdevfsCtrlTransfer{}))
+
+// Control transfer directions and recipients, from the USB specification's
+// bmRequestType.
+const (
+	// ctrlToDevice is a transfer that carries data to the device.
+	ctrlToDevice = 0x00
+	// ctrlToHost is one that brings data back.
+	ctrlToHost = 0x80
+	// ctrlClass addresses the device's class driver rather than USB itself,
+	// which is what every UVC request is.
+	ctrlClass = 0x20
+	// ctrlInterface addresses one interface, named in wIndex.
+	ctrlInterface = 0x01
+)
+
+// ControlTimeout bounds one control transfer.
+//
+// ⚠ A CONTROL TRANSFER WITH NO TIMEOUT CAN HANG THE CALLER FOREVER. A camera
+// that stops answering mid-negotiation would otherwise take the goroutine with
+// it, and a probe that hangs is worse than one that fails: it reports nothing
+// at all. One second is far longer than a camera takes to answer a nine-byte
+// request.
+const ControlTimeout = 1000
+
+// ControlIn builds the bmRequestType of a class request that brings data back
+// from one interface, which is every UVC GET.
+func ControlIn() uint8 { return ctrlToHost | ctrlClass | ctrlInterface }
+
+// ControlOut builds the bmRequestType of a class request that carries data to
+// one interface, which is every UVC SET.
+func ControlOut() uint8 { return ctrlToDevice | ctrlClass | ctrlInterface }

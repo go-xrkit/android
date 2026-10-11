@@ -167,9 +167,44 @@ func run(ctx context.Context, args []string) int {
 	}
 	say("ANSWER YES — the kernel ACCEPTED an isochronous request on endpoint %#02x",
 		ep.Address)
-	say("RESULT usbfs is a usable route. What remains is a UVC implementation: the "+
-		"probe/commit negotiation, frame assembly from the packet descriptors, and "+
-		"decoding whatever format %d:%d advertises. None of it is written.",
+
+	// ⭐ AND THEN ASK THE CAMERA ITSELF. Everything above was the kernel
+	// agreeing to carry bytes; this is the device agreeing to produce them, and
+	// it is a separate question with a separate answer.
+	say("")
+	formats, ferr := desc.UVCFormats(iface.Number)
+	if ferr != nil {
+		say("STEP 5 formats               FAILED: %v", ferr)
+		return 1
+	}
+	say("STEP 5 read formats          OK — %d format(s) on interface %d",
+		len(formats), iface.Number)
+	for _, f := range formats {
+		say("    %s", f)
+	}
+	want, size, perr := android.PickFormat(formats)
+	if perr != nil {
+		say("STEP 6 pick                  FAILED: %v", perr)
+		return 1
+	}
+	say("STEP 6 pick                  %s %s", want.Format, size)
+
+	neg, nerr := h.Negotiate(iface.Number, want, size)
+	if nerr != nil {
+		say("STEP 7 negotiate             FAILED: %v", nerr)
+		say("RESULT the kernel carries the transfer and the CAMERA would not settle on a " +
+			"format. That is a device conversation rather than a platform limit, and the " +
+			"error above says which step of probe/commit it refused.")
+		return 1
+	}
+	say("STEP 7 negotiate             OK — %s", neg)
+	if neg.Changed() {
+		say("⚠ THE CAMERA CHANGED THE TERMS. It is entitled to, and what it answered is " +
+			"what will arrive — not what was asked for.")
+	}
+	say("RESULT usbfs is a usable route and the camera has settled on a format. What "+
+		"remains is the STREAM: reaping the requests, assembling payloads into frames, "+
+		"and handing them to headflow. Interface %d alternate %d is committed.",
 		iface.Number, iface.Alternate)
 	say("⚠ ACCEPTED IS NOT STREAMING. This submitted one request and cancelled it; it " +
 		"says the kernel takes the call, not that pixels arrive.")

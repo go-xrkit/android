@@ -23,6 +23,7 @@ import (
 // asks is an ioctl, and the ANSWER being a refusal is the expected outcome.
 var (
 	ioctl           = rawIoctl
+	ioctlN          = rawIoctlN
 	readDescriptors = preadAll
 )
 
@@ -60,12 +61,23 @@ func preadAll(fd int) ([]byte, error) {
 	return nil, fmt.Errorf("%w: more than %d descriptor bytes", ErrBadPayload, MaxDescriptorBytes)
 }
 
-func rawIoctl(fd int, req uintptr, arg unsafe.Pointer) error {
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), req, uintptr(arg))
+// rawIoctlN issues one ioctl and keeps its RETURN VALUE, which some usbfs
+// commands use: the control transfer answers with the number of bytes that
+// moved, and discarding it would leave a caller reading whatever happened to be
+// in its buffer already.
+func rawIoctlN(fd int, req uintptr, arg unsafe.Pointer) (int, error) {
+	n, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), req, uintptr(arg))
 	if errno != 0 {
-		return errno
+		return 0, errno
 	}
-	return nil
+	return int(n), nil
+}
+
+// rawIoctl is the same call for the commands whose answer is only success or
+// failure. It delegates, so there is ONE place the errno is read.
+func rawIoctl(fd int, req uintptr, arg unsafe.Pointer) error {
+	_, err := rawIoctlN(fd, req, arg)
+	return err
 }
 
 // A USBHandle is one USB device this application was given permission to open,
@@ -350,4 +362,40 @@ func (h *USBHandle) Close() error {
 	}
 	h.session.shutdown(ErrClosed)
 	return first
+}
+
+// Control performs one control transfer and returns how many bytes moved.
+//
+// ⛔⛔ data IS WRITTEN INTO BY THE KERNEL ON AN IN TRANSFER, and its length is
+// what the device is told to send. A slice shorter than the device's answer
+// gets a short read; one longer invites it to overrun nothing, because the
+// length in the request is the ceiling. Either way the number returned is what
+// actually moved, and callers must use it rather than len(data).
+//
+// It is the whole of UVC's negotiation: asking a camera what it can do and
+// telling it what to do are both control transfers on its streaming interface.
+func (h *USBHandle) Control(requestType, request uint8, value, index uint16, data []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return 0, ErrClosed
+	}
+	t := usbdevfsCtrlTransfer{
+		RequestType: requestType,
+		Request:     request,
+		Value:       value,
+		Index:       index,
+		Length:      uint16(len(data)),
+		Timeout:     ControlTimeout,
+	}
+	if len(data) > 0 {
+		t.Data = uintptr(unsafe.Pointer(&data[0]))
+	}
+	n, err := ioctlN(h.fd, usbdevfsControl, unsafe.Pointer(&t))
+	runtime.KeepAlive(data)
+	if err != nil {
+		return 0, fmt.Errorf("android: control transfer %#02x/%#02x value %#04x to %s: %w",
+			requestType, request, value, h.name, err)
+	}
+	return n, nil
 }
