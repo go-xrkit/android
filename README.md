@@ -1287,7 +1287,36 @@ Each cost a cycle and one of them cost a wrong conclusion.
 It waits for the **transcript file** rather than for a duration, notices a
 **crash** instead of timing out on one, refuses to choose when two devices are
 listed — wireless `adb` lists the same phone twice — and finds the SDK and JDK
-itself rather than demanding two exports. `host/build.sh` stays a script,
+itself rather than demanding two exports.
+
+⛔ **And it asks whether the phone can run anything at all, before it builds.**
+Behind the lock screen Android does not credit the application as foreground,
+however resumed its Activity is, so the host's own `startService` throws and the
+process dies in `onResume` — three times, each at the end of a forty-second
+build. It reads `dumpsys power` *and* `dumpsys window policy`, because the
+wakefulness is in one and the keyguard in the other, and it names which
+condition is in the way:
+
+```
+xrrun: … is not usable: it is asleep and it is locked.
+⛔ WAKE AND UNLOCK THE PHONE, AND LEAVE IT ON.
+  adb -s … shell svc power stayon usb   # keeps it awake while plugged in
+```
+
+⚠ **The strings it looks for were read off the phone, not taken from the crash
+transcript.** The first version grepped `window policy` for `mWakefulness=Dozing`
+— a string that section never prints — so it would have passed a sleeping
+device, behind ten green hand-written expectations. `isKeyguardShowing` appears
+in neither section; the keyguard says `showing=true` and `inputRestricted=true`
+in its own delegate block. And `screenState` is **`SCREEN_STATE_ON` while the
+phone sleeps**, because of the always-on display, so a check on the screen is
+the wrong check. One real transcript is pinned as the fixture.
+
+⚠ **A section it cannot read is not a refusal**: `dumpsys` gets renamed between
+releases, and a tool that refused to run because it could not find a field would
+be worse than the crash it avoids — the crash at least names its own cause.
+
+`host/build.sh` stays a script,
 because `aapt2`, `javac`, `d8`, `zipalign` and `apksigner` in a row have no
 decisions in them.
 
