@@ -111,6 +111,13 @@ func run(ctx context.Context, argv []string) error {
 		fmt.Printf("==> device %s\n", d)
 	}
 
+	// ⛔ ASKED BEFORE THE BUILD, because the build takes forty seconds and a
+	// locked phone refuses at the end of them. It is asked AGAIN below, just
+	// before the start, because a phone locks itself during a build.
+	if err := awake(ctx, o.device); err != nil {
+		return err
+	}
+
 	if o.build {
 		fmt.Printf("==> building %s\n", o.app)
 		if err := build(ctx, o); err != nil {
@@ -156,6 +163,9 @@ func run(ctx context.Context, argv []string) error {
 		start = append(start, "--es", "args", "'"+o.args+"'")
 	}
 	fmt.Printf("==> starting %s %s\n", name, o.args)
+	if err := awake(ctx, o.device); err != nil {
+		return err
+	}
 	if _, err := adb(ctx, o.device, start...); err != nil {
 		return err
 	}
@@ -202,6 +212,108 @@ func waitForTranscript(ctx context.Context, o options, file string) (string, err
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// awake refuses to run on a phone that is asleep or locked, and says which.
+//
+// ⛔⛔ THIS COST THREE MEASUREMENT CYCLES, EVERY ONE OF THEM AT THE END. Behind
+// the keyguard the platform does not credit the application as foreground,
+// however resumed its Activity is, so startService throws and the process dies
+// in onResume:
+//
+//	BackgroundServiceStartNotAllowedException: app is in background
+//	  uid u0a350 ... bg:+107ms idle
+//	mWakefulness=Dozing
+//	isKeyguardShowing=true
+//
+// Read from the far side first, that is one line before anything is built. And
+// it reads BOTH conditions because they are different phones' problems: a dark
+// screen (Dozing, Asleep) and an unlocked-but-covered one (keyguard showing)
+// each refuse a service start on their own, and a check that read only the
+// wakefulness passed on a phone that then refused.
+//
+// ⚠ A DEVICE THAT CANNOT BE ASKED IS ALLOWED THROUGH. dumpsys sections get
+// renamed between releases, and a tool that refused to run because it could not
+// find a field would be worse than the crash it is avoiding — the crash at
+// least names its own cause.
+func awake(ctx context.Context, device string) error {
+	// ⛔⛔ BOTH SECTIONS, BECAUSE THE TWO FACTS LIVE IN DIFFERENT ONES. The
+	// wakefulness is in `dumpsys power` and the keyguard is in `dumpsys window
+	// policy`, which I learned by READING THE PHONE rather than from the crash
+	// transcript: the first version of this grepped only `window policy` for
+	// `mWakefulness=Dozing`, a string that section never prints, and would have
+	// passed a phone that was asleep at that moment.
+	var text string
+	for _, section := range [][]string{
+		{"shell", "dumpsys", "power"},
+		{"shell", "dumpsys", "window", "policy"},
+	} {
+		out, err := adb(ctx, device, section...)
+		if err != nil {
+			continue // see the note above: unreadable is not a refusal
+		}
+		text += string(out)
+	}
+	why := lockedBecause(text)
+	if len(why) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s is not usable: %s.\n\n"+
+		"⛔ WAKE AND UNLOCK THE PHONE, AND LEAVE IT ON. Android does not credit a locked "+
+		"application as foreground, so the host's own service start is refused and the "+
+		"probe dies before it measures anything. There is no flag for this and there "+
+		"should not be: the platform is right and the phone is the thing to change.\n"+
+		"  adb -s %s shell svc power stayon usb   # keeps it awake while plugged in",
+		device, strings.Join(why, " and "), device)
+}
+
+// lockedBecause names every reason the dumpsys output gives for a phone being
+// unusable, and is separate from [awake] so it can be tested without a phone.
+//
+// ⛔ BOTH CONDITIONS ARE READ, NOT ONE. An asleep phone and an awake-but-locked
+// one each refuse a service start on their own, and reading only the wakefulness
+// passes on the second. They are returned together, because a person told "it is
+// asleep" who then wakes it and is told "it is locked" has been sent round twice
+// for one problem.
+//
+// ⛔⛔ AND EVERY STRING HERE WAS READ OFF THE PHONE, not taken from the crash
+// transcript. Measured on a Pixel 11 Pro Fold on 2026-10-11, asleep and locked:
+//
+//	dumpsys power          mWakefulness=Dozing        mIsInteractive: false
+//	dumpsys window policy  showing=true               inputRestricted=true
+//	                       interactiveState=INTERACTIVE_STATE_SLEEP
+//	                       screenState=SCREEN_STATE_ON   ← always-on display
+//
+// Three things that transcript corrects. `mWakefulness` is in `dumpsys power`
+// and NOT in `window policy`, which the first version of this grepped alone.
+// `isKeyguardShowing` appears in neither — the keyguard says `showing=true`
+// inside its own delegate block. And `screenState` is ON while the phone sleeps,
+// so a check on the screen would have called this phone usable.
+func lockedBecause(dumpsys string) []string {
+	var why []string
+	for _, c := range []struct {
+		say   string
+		signs []string
+	}{
+		{"it is asleep", []string{
+			"mWakefulness=Dozing", "mWakefulness=Asleep",
+			"mIsInteractive: false", "INTERACTIVE_STATE_SLEEP",
+		}},
+		// inputRestricted is the keyguard's own word for what it is doing, and
+		// it is what makes the application not foreground. isKeyguardShowing is
+		// kept for the releases that print it.
+		{"it is locked", []string{
+			"inputRestricted=true", "isKeyguardShowing=true", "mShowingLockscreen=true",
+		}},
+	} {
+		for _, s := range c.signs {
+			if strings.Contains(dumpsys, s) {
+				why = append(why, c.say)
+				break
+			}
+		}
+	}
+	return why
 }
 
 // soleDevice returns the only attached device, refusing to choose.

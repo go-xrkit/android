@@ -103,6 +103,21 @@ type USBHandle struct {
 	// while they are detached, so leaving them that way would make the camera
 	// unusable to everything until it was unplugged.
 	detached []int
+	// pinned is memory the kernel has been given the address of and may still be
+	// writing into.
+	//
+	// ⛔⛔ THAT LIFETIME BELONGS TO THE DESCRIPTOR AND NOT TO THE STREAM. A
+	// submitted isochronous request has the kernel writing into this process's
+	// heap on the camera's schedule, and it keeps doing so until the request is
+	// discarded or THE DESCRIPTOR IS CLOSED — closing the usbfs fd is what
+	// cancels what is outstanding. A UVCStream that became unreachable without
+	// Close would let its slots be collected while the kernel still held their
+	// addresses: a use-after-free performed by the kernel, landing in whatever
+	// the allocator handed out next, and reported by nothing.
+	//
+	// Holding them here ties that memory to the one thing whose closing
+	// actually stops the writes.
+	pinned []*urbSlot
 	// session is the connection the host lent the descriptor over. It is held
 	// open because the HOST holds the UsbDeviceConnection: dropping the socket
 	// lets the host release the device, and the descriptor here then names
@@ -360,8 +375,22 @@ func (h *USBHandle) Close() error {
 	if err := closeFD(fd); err != nil && first == nil {
 		first = err
 	}
+	// ⛔ AFTER closeFD AND NOT BEFORE. Closing the descriptor is what cancels
+	// the outstanding requests; letting go of the memory first would open the
+	// exact window pinning exists to close.
+	h.mu.Lock()
+	h.pinned = nil
+	h.mu.Unlock()
 	h.session.shutdown(ErrClosed)
 	return first
+}
+
+// pin keeps memory alive for as long as the descriptor is open; see
+// USBHandle.pinned for why that is the right owner.
+func (h *USBHandle) pin(slots ...*urbSlot) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pinned = append(h.pinned, slots...)
 }
 
 // Control performs one control transfer and returns how many bytes moved.

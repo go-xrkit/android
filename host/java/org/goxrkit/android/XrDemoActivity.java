@@ -72,10 +72,25 @@ public final class XrDemoActivity extends Activity {
         }
         started = true;
 
-        // The wall host is an ordinary service: no projection, no consent, no
-        // foreground requirement. It is started first and unconditionally,
-        // because nothing can refuse it.
-        startService(new Intent(this, XrWallService.class));
+        // ⛔⛔ AND IT IS GUARDED, BECAUSE SOMETHING CAN REFUSE IT. Behind the
+        // lock screen the platform does not consider this application
+        // foreground, however resumed its Activity is, and startService throws
+        // BackgroundServiceStartNotAllowedException — which TAKES THE PROCESS
+        // DOWN from onResume. That crash cost a measurement cycle three times:
+        //
+        //   app is in background uid u0a350 ... bg:+107ms idle
+        //   at XrDemoActivity.onResume(XrDemoActivity.java:78)
+        //
+        // Caught, the Go application finds no host socket and says so in its
+        // own transcript, which is a readable failure instead of a stack trace.
+        try {
+            startService(new Intent(this, XrWallService.class));
+        } catch (RuntimeException e) {
+            Log.e(XrHostService.TAG, "cannot start the wall host: the application is not "
+                    + "foreground, which behind the lock screen it is not however resumed "
+                    + "this Activity is. UNLOCK THE PHONE and start it again.", e);
+            return;
+        }
 
         // ⛔ startService, NOT startForegroundService. The capture host only
         // becomes a mediaProjection foreground service once consent exists --

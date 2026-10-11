@@ -917,7 +917,9 @@ every size is the better answer.
 ### What is written, and what is not
 
 `cmd/xrusb` and the layer under it go as far as "the kernel accepts the
-request". The parts most likely to be silently wrong are pinned:
+request", and then one step further, **to frames** — see the stream below for
+what that step does and does not prove. The parts most likely to be silently
+wrong are pinned:
 
 - the **ioctl numbers are computed** from this package's own mirrors of the
   kernel's structs, and the suite asserts the results against the values
@@ -935,11 +937,67 @@ request". The parts most likely to be silently wrong are pinned:
 - the descriptors are read with `pread(2)` **on the lent descriptor**, never by
   reopening a path to it.
 
-What is **not** written: the STREAM. Reaping the requests, assembling payloads
-into frames, and handing them to `go-xrkit/xrkit/headflow`, which is waiting
-behind them already measured at 1.14 % residual. The negotiation IS written and
-the camera has committed, so the remaining work is ordinary, with no platform
-question left in it.
+### The stream: reaping, assembling, decoding
+
+`USBHandle.Stream` keeps `StreamURBs` = 4 isochronous requests in flight, reaps
+them without blocking, assembles payloads into frames and decodes YUY2 into an
+`*image.RGBA` — which is what `headflow` takes.
+
+⛔ **Four in flight is not a tuning choice.** An isochronous endpoint is
+scheduled every microframe whether anybody is listening: between reaping one
+request and submitting the next, the camera's packets go nowhere. At
+`ISOPacketsPerURB` = 8 packets a request each covers a millisecond, so four
+leave three outstanding while one is being emptied.
+
+The decisions that are easy to get silently wrong, and what each one is:
+
+| | |
+|---|---|
+| **the frame boundary is the FID toggle, not the end-of-frame bit** | cameras that never set EOF exist, and on one of those a boundary waiting for it would run every frame into the next forever and deliver nothing. EOF is still honoured when it comes, because it ends a frame one payload earlier |
+| **`bHeaderLength` is the offset and is NOT constant** | cameras use 2, 12 and more. A fixed two bytes prepends ten bytes of timestamp to every frame, which does not fail — it shears the image by five YUY2 pixels and looks like a lens mounted crooked |
+| **a short frame is dropped, never padded** | a lost packet leaves a band missing, and zeros there are a black stripe that a tracker reads as *structure*. Worse than no frame |
+| **`Late` is counted apart from `Dropped`** | a dropped frame is the bus's fault and says the link is lossy; a late one is OURS and says the consumer is slower than the camera. One counter for both makes a slow tracker look like a bad cable |
+| **luminance goes into all three channels** | not a shortcut: `headflow.Profile` sums R+G+B down each column, so grey carries exactly what it reads, and every other byte of YUY2 *is* the luminance. A full YUV conversion would compute chrominance for it to add up and discard |
+| **a reaped URB is matched by ADDRESS, compared as a number** | converting the kernel's answer back to a `*usbdevfs_urb` is the unsafe misuse `go vet` refuses, and nothing keeps that object alive across the round trip. The slot already knows its own memory |
+
+⛔⛔ **One request can complete TWO frames, and the first version of this code
+returned only the last.** A frame small enough to fit in fewer than eight
+packets finishes twice inside one `drain`, so `Stats` said two frames and the
+caller got one — and the next call then hung until its deadline. It does not
+happen at 640×480, where a frame is some two hundred packets, which is exactly
+why a test found it and reading the code would not have. Completed frames are
+queued now, and the queue has a ceiling that sheds the **oldest**, because head
+tracking wants the freshest.
+
+Two things the device chooses rather than this process, and so are bounded:
+
+- **the memory the kernel writes into is held by the DESCRIPTOR, not by the
+  stream.** A submitted request has the kernel writing into this process's heap
+  on the camera's schedule until that request is discarded or the fd closes. A
+  `UVCStream` that became unreachable without `Close` would let its slots be
+  collected while the kernel still held their addresses: a use-after-free
+  performed by the kernel, landing in whatever the allocator handed out next,
+  and reported by nothing. The handle pins them, tying that memory to the one
+  thing whose closing actually stops the writes;
+- **a frame's size comes from two 16-bit descriptor fields**, so a broken or
+  hostile camera can ask for 65535×65535 — 8.6 GB, allocated twice over before
+  anything else happens. `MaxFrameBytes` refuses it, with the check written as a
+  division because the product it guards against is the one that overflows.
+
+⚠ **What is measured, and what is not.** Both lanes are at 100 % statement
+coverage and race-clean, a fake camera drives the whole path from packets to
+pixels, and `cmd/xrusb` reports the **luminance spread** of the middle row
+rather than a frame count — because a black frame looks exactly like a working
+stream to a counter, which is this file's oldest trap. But the on-device run has
+**not** happened: the phone was behind its lock screen, where Android does not
+credit the application as foreground and refuses its own service start. So "the
+camera's pixels reach a CGO-free Go process" is still the agreement of the
+kernel and the camera, not a witnessed picture.
+
+⛔ That lock screen cost three measurement cycles, every one of them at the end
+of a build. It is now read **before** anything is built — `tools/xrrun` asks
+`dumpsys` and names which of the two conditions is in the way, screen or
+keyguard — and the host catches the exception instead of dying in `onResume`.
 
 ## Input
 
@@ -1229,7 +1287,36 @@ Each cost a cycle and one of them cost a wrong conclusion.
 It waits for the **transcript file** rather than for a duration, notices a
 **crash** instead of timing out on one, refuses to choose when two devices are
 listed — wireless `adb` lists the same phone twice — and finds the SDK and JDK
-itself rather than demanding two exports. `host/build.sh` stays a script,
+itself rather than demanding two exports.
+
+⛔ **And it asks whether the phone can run anything at all, before it builds.**
+Behind the lock screen Android does not credit the application as foreground,
+however resumed its Activity is, so the host's own `startService` throws and the
+process dies in `onResume` — three times, each at the end of a forty-second
+build. It reads `dumpsys power` *and* `dumpsys window policy`, because the
+wakefulness is in one and the keyguard in the other, and it names which
+condition is in the way:
+
+```
+xrrun: … is not usable: it is asleep and it is locked.
+⛔ WAKE AND UNLOCK THE PHONE, AND LEAVE IT ON.
+  adb -s … shell svc power stayon usb   # keeps it awake while plugged in
+```
+
+⚠ **The strings it looks for were read off the phone, not taken from the crash
+transcript.** The first version grepped `window policy` for `mWakefulness=Dozing`
+— a string that section never prints — so it would have passed a sleeping
+device, behind ten green hand-written expectations. `isKeyguardShowing` appears
+in neither section; the keyguard says `showing=true` and `inputRestricted=true`
+in its own delegate block. And `screenState` is **`SCREEN_STATE_ON` while the
+phone sleeps**, because of the always-on display, so a check on the screen is
+the wrong check. One real transcript is pinned as the fixture.
+
+⚠ **A section it cannot read is not a refusal**: `dumpsys` gets renamed between
+releases, and a tool that refused to run because it could not find a field would
+be worse than the crash it avoids — the crash at least names its own cause.
+
+`host/build.sh` stays a script,
 because `aapt2`, `javac`, `d8`, `zipalign` and `apksigner` in a row have no
 decisions in them.
 
