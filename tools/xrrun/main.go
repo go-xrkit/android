@@ -111,6 +111,13 @@ func run(ctx context.Context, argv []string) error {
 		fmt.Printf("==> device %s\n", d)
 	}
 
+	// ⛔ ASKED BEFORE THE BUILD, because the build takes forty seconds and a
+	// locked phone refuses at the end of them. It is asked AGAIN below, just
+	// before the start, because a phone locks itself during a build.
+	if err := awake(ctx, o.device); err != nil {
+		return err
+	}
+
 	if o.build {
 		fmt.Printf("==> building %s\n", o.app)
 		if err := build(ctx, o); err != nil {
@@ -156,6 +163,9 @@ func run(ctx context.Context, argv []string) error {
 		start = append(start, "--es", "args", "'"+o.args+"'")
 	}
 	fmt.Printf("==> starting %s %s\n", name, o.args)
+	if err := awake(ctx, o.device); err != nil {
+		return err
+	}
 	if _, err := adb(ctx, o.device, start...); err != nil {
 		return err
 	}
@@ -202,6 +212,73 @@ func waitForTranscript(ctx context.Context, o options, file string) (string, err
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// awake refuses to run on a phone that is asleep or locked, and says which.
+//
+// ⛔⛔ THIS COST THREE MEASUREMENT CYCLES, EVERY ONE OF THEM AT THE END. Behind
+// the keyguard the platform does not credit the application as foreground,
+// however resumed its Activity is, so startService throws and the process dies
+// in onResume:
+//
+//	BackgroundServiceStartNotAllowedException: app is in background
+//	  uid u0a350 ... bg:+107ms idle
+//	mWakefulness=Dozing
+//	isKeyguardShowing=true
+//
+// Read from the far side first, that is one line before anything is built. And
+// it reads BOTH conditions because they are different phones' problems: a dark
+// screen (Dozing, Asleep) and an unlocked-but-covered one (keyguard showing)
+// each refuse a service start on their own, and a check that read only the
+// wakefulness passed on a phone that then refused.
+//
+// ⚠ A DEVICE THAT CANNOT BE ASKED IS ALLOWED THROUGH. dumpsys sections get
+// renamed between releases, and a tool that refused to run because it could not
+// find a field would be worse than the crash it is avoiding — the crash at
+// least names its own cause.
+func awake(ctx context.Context, device string) error {
+	out, err := adb(ctx, device, "shell", "dumpsys", "window", "policy")
+	if err != nil {
+		return nil // see the note above: unreadable is not a refusal
+	}
+	why := lockedBecause(string(out))
+	if len(why) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s is not usable: %s.\n\n"+
+		"⛔ UNLOCK THE PHONE AND LEAVE IT ON. Android does not credit a locked "+
+		"application as foreground, so the host's own service start is refused and the "+
+		"probe dies before it measures anything. There is no flag for this and there "+
+		"should not be: the platform is right and the phone is the thing to change.\n"+
+		"  adb -s %s shell svc power stayon usb   # keeps it awake while plugged in",
+		device, strings.Join(why, " and "), device)
+}
+
+// lockedBecause names every reason one dumpsys section gives for a phone being
+// unusable, and is separate from [awake] so it can be tested without a phone.
+//
+// ⛔ BOTH CONDITIONS ARE READ, NOT ONE. A dark screen and an unlocked-but-
+// covered one each refuse a service start on their own, and reading only the
+// wakefulness passes on a phone that then refuses. They are returned together
+// because a person told "its screen is off" who then unlocks and is told "it is
+// locked" has been sent round twice for one problem.
+func lockedBecause(dumpsys string) []string {
+	var why []string
+	for _, c := range []struct {
+		say   string
+		signs []string
+	}{
+		{"its screen is off", []string{"mScreenOnFully=false", "Dozing", "mAwake=false"}},
+		{"it is locked", []string{"isKeyguardShowing=true", "mShowingLockscreen=true"}},
+	} {
+		for _, s := range c.signs {
+			if strings.Contains(dumpsys, s) {
+				why = append(why, c.say)
+				break
+			}
+		}
+	}
+	return why
 }
 
 // soleDevice returns the only attached device, refusing to choose.

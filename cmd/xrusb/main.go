@@ -202,24 +202,105 @@ func run(ctx context.Context, args []string) int {
 		say("⚠ THE CAMERA CHANGED THE TERMS. It is entitled to, and what it answered is " +
 			"what will arrive — not what was asked for.")
 	}
-	say("RESULT usbfs is a usable route and the camera has settled on a format. What "+
-		"remains is the STREAM: reaping the requests, assembling payloads into frames, "+
-		"and handing them to headflow. Interface %d alternate %d is committed.",
-		iface.Number, iface.Alternate)
-	say("⚠ ACCEPTED IS NOT STREAMING. This submitted one request and cancelled it; it " +
-		"says the kernel takes the call, not that pixels arrive.")
-	// ⛔⛔ SAY WHAT WAS TAKEN FROM THE REST OF THE PHONE. Claiming the streaming
-	// interface detaches uvcvideo, and USBDEVFS_CONNECT does not reliably put
-	// it back: the ioctl succeeds and the driver still does not rebind. A probe
-	// that left the camera half dismantled without a word would be worse than
-	// one that failed.
+
+	// ⛔ AND NOW THE ONLY QUESTION THAT WAS EVER WORTH ASKING: do pixels
+	// arrive? Everything above is agreement — the kernel's and the camera's —
+	// and agreement has been mistaken for pixels once already in this file.
+	say("")
+	code := stream(ctx, h, neg, ep, size, say)
+	sayDebt(h, say)
+	return code
+}
+
+// stream reads frames and says whether they are pictures.
+//
+// ⛔⛔ A BLACK FRAME LOOKS EXACTLY LIKE A WORKING STREAM from a counter's point
+// of view, and that is this package's oldest trap — the same one cmd/xrscreen
+// has at the other end. So this reports the LUMINANCE SPREAD of what arrived,
+// which is what go-xrkit/xrkit/headflow itself refuses to track on when it is
+// zero: a frame with no structure cannot be a reference for anything.
+func stream(ctx context.Context, h *android.USBHandle, neg android.UVCNegotiation,
+	ep android.USBEndpoint, size android.UVCFrameSize, say func(string, ...any)) int {
+	s, err := h.Stream(neg, ep, size.Width, size.Height)
+	if err != nil {
+		say("STEP 8 stream                FAILED: %v", err)
+		return 1
+	}
+	defer func() { _ = s.Close() }()
+
+	const want = 10
+	deadline := time.Now().Add(15 * time.Second)
+	rctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	start := time.Now()
+	var lo, hi byte = 255, 0
+	got := 0
+	for got < want {
+		img, err := s.Frame(rctx)
+		if err != nil {
+			break
+		}
+		got++
+		// Sample the middle band, which is where headflow looks.
+		y := size.Height / 2
+		row := img.Pix[y*img.Stride:]
+		for x := 0; x < size.Width; x++ {
+			l := row[x*4]
+			lo, hi = min(lo, l), max(hi, l)
+		}
+	}
+	elapsed := time.Since(start)
+	st := s.Stats()
+	say("STEP 8 stream                %d frame(s) in %s", got, elapsed.Round(time.Millisecond))
+	say("    %s", st)
+
+	if got == 0 {
+		say("ANSWER NO PIXELS — the camera agreed to a format and delivered no whole " +
+			"frame. The packet and byte counts above say whether anything arrived at " +
+			"all: packets with no bytes mean the endpoint is scheduled and the camera " +
+			"is silent, while bytes with no frames mean the payloads are arriving and " +
+			"the assembly is wrong.")
+		return 1
+	}
+	say("ANSWER %d WHOLE FRAMES at %.3g fps, luminance %d..%d",
+		got, float64(got)/elapsed.Seconds(), lo, hi)
+	if st.Late > 0 {
+		// ⭐ LATE IS OURS AND DROPPED IS THE BUS'S, which is why they are
+		// counted apart: the fixes are opposite. A late frame says this loop is
+		// slower than the camera; a dropped one says the link loses packets.
+		say("⚠ %d frame(s) WERE SHED because this loop did not come back for them in "+
+			"time. That is not a lossy link — it is this process being slower than the "+
+			"camera, and the frames kept are the freshest, which is what a tracker "+
+			"wants.", st.Late)
+	}
+	if hi == lo {
+		say("⛔ AND THEY ARE BLANK. Every pixel of the middle row is %d, so the stream "+
+			"runs and carries no picture — which is exactly what a working one looks "+
+			"like to a frame counter. headflow would refuse to track on this.", lo)
+		return 1
+	}
+	say("RESULT the camera's pixels reach a CGO-free Go process on an unrooted phone, "+
+		"with a luminance spread of %d. What remains is wiring them to "+
+		"go-xrkit/xrkit/headflow, which takes an *image.RGBA and is what Decode "+
+		"produces.", hi-lo)
+	return 0
+}
+
+// sayDebt reports what claiming the camera took from the rest of the phone.
+//
+// ⛔⛔ IT IS PRINTED WHETHER THE RUN SUCCEEDED OR NOT. Claiming the streaming
+// interface detaches uvcvideo, and USBDEVFS_CONNECT does not reliably put it
+// back: the ioctl succeeds and the driver still does not rebind. A probe that
+// left the camera half dismantled without a word would be worse than one that
+// failed — and a failing run is exactly when nobody reads to the end.
+func sayDebt(h *android.USBHandle, say func(string, ...any)) {
 	if d := h.Detached(); len(d) > 0 {
 		say("⛔ INTERFACE %v WAS TAKEN FROM uvcvideo and the reconnect does not restore "+
 			"the binding on this phone: /dev/video0 survives on the control interface, "+
 			"but the streaming one is left with no driver. UNPLUG AND REPLUG the headset "+
 			"to give it back to the system.", d)
 	}
-	return 0
 }
 
 // AIDCamera is Android's camera group, AID_CAMERA. /dev/video* is owned
