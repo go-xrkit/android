@@ -15,6 +15,27 @@ import (
 // resumed its Activity is, so the host's own service start throws and the
 // process dies in onResume — after a forty-second build and an install. The
 // transcripts the fleet keeps of those runs are the fixtures here.
+//
+// ⛔⛔ THE FIXTURE BELOW IS WHAT THE PHONE PRINTED, not what I expected it to.
+// The first version of this test was written from the crash transcript and
+// asserted `mWakefulness=Dozing` against `dumpsys window policy` — a string
+// that section never prints. Ten expectations, all green, and the guard would
+// have passed a phone that was asleep at that moment. Pinning one real
+// transcript is the control; see the fleet note about hand-written
+// expectations.
+const asleepAndLocked = `  mWakefulness=Dozing
+  mWakefulnessChanging=false
+  mHalInteractiveModeEnabled=false
+    mIsInteractive: false
+    mKeyguardOccluded=false mPendingKeyguardOccluded=false
+    KeyguardServiceDelegate
+      showing=true
+      inputRestricted=true
+      occluded=false
+      screenState=SCREEN_STATE_ON
+      interactiveState=INTERACTIVE_STATE_SLEEP
+`
+
 func TestAPhoneThatCannotRunAProbeSaysSo(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -22,31 +43,38 @@ func TestAPhoneThatCannotRunAProbeSaysSo(t *testing.T) {
 		want []string
 	}{
 		{
-			// The run of 2026-10-11 that crashed instead of measuring.
-			name: "dozing behind the keyguard",
-			in: "    mWakefulness=Dozing\n" +
-				"    isKeyguardShowing=true\n" +
-				"    mScreenOnFully=false\n",
-			want: []string{"its screen is off", "it is locked"},
+			// Measured on the Pixel 11 Pro Fold, 2026-10-11 18:25 CEST.
+			name: "asleep and locked, as the phone itself reports it",
+			in:   asleepAndLocked,
+			want: []string{"it is asleep", "it is locked"},
 		},
 		{
-			// ⛔ THE CASE A WAKEFULNESS-ONLY CHECK WOULD HAVE PASSED: the screen
-			// is on, the phone is in a pocket under the lock screen, and the
-			// service start is refused all the same.
+			// ⛔ THE CASE A WAKEFULNESS-ONLY CHECK WOULD HAVE PASSED: the phone
+			// is awake, in a pocket under the lock screen, and the service
+			// start is refused all the same.
 			name: "awake but locked",
-			in:   "    mWakefulness=Awake\n    isKeyguardShowing=true\n",
+			in:   "  mWakefulness=Awake\n    mIsInteractive: true\n      inputRestricted=true\n",
 			want: []string{"it is locked"},
 		},
 		{
-			name: "asleep but with no keyguard",
-			in:   "    mAwake=false\n    isKeyguardShowing=false\n",
-			want: []string{"its screen is off"},
+			name: "asleep with the keyguard not restricting",
+			in:   "  mWakefulness=Asleep\n      inputRestricted=false\n",
+			want: []string{"it is asleep"},
 		},
 		{
 			name: "usable",
-			in: "    mWakefulness=Awake\n    isKeyguardShowing=false\n" +
-				"    mScreenOnFully=true\n",
+			in: "  mWakefulness=Awake\n    mIsInteractive: true\n" +
+				"      showing=false\n      inputRestricted=false\n" +
+				"      interactiveState=INTERACTIVE_STATE_AWAKE\n",
 			want: nil,
+		},
+		{
+			// ⛔ AND THE TRAP THE MEASUREMENT EXPOSED: the screen is ON while
+			// this phone sleeps, because of the always-on display. A check that
+			// read the screen would have called the fixture above usable.
+			name: "the screen is on and the phone is still asleep",
+			in:   "  mWakefulness=Dozing\n      screenState=SCREEN_STATE_ON\n",
+			want: []string{"it is asleep"},
 		},
 		{
 			// ⚠ AN UNREADABLE SECTION IS NOT A REFUSAL. dumpsys gets renamed
@@ -67,12 +95,11 @@ func TestAPhoneThatCannotRunAProbeSaysSo(t *testing.T) {
 	}
 }
 
-// Each reason must appear once, or a phone that is both dark and locked is
-// described twice and the message reads as two separate problems.
+// Each reason must appear once, or a phone that is both asleep and locked is
+// described twice and the message reads as two separate problems. The real
+// transcript trips several signs for each reason, which is why this matters.
 func TestEachReasonIsGivenOnce(t *testing.T) {
-	in := "mWakefulness=Dozing\nmScreenOnFully=false\nmAwake=false\n" +
-		"isKeyguardShowing=true\nmShowingLockscreen=true\n"
-	got := lockedBecause(in)
+	got := lockedBecause(asleepAndLocked + "isKeyguardShowing=true\nmShowingLockscreen=true\n")
 	if len(got) != 2 {
 		t.Fatalf("lockedBecause = %q, want exactly the two reasons", got)
 	}

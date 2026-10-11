@@ -237,16 +237,29 @@ func waitForTranscript(ctx context.Context, o options, file string) (string, err
 // find a field would be worse than the crash it is avoiding — the crash at
 // least names its own cause.
 func awake(ctx context.Context, device string) error {
-	out, err := adb(ctx, device, "shell", "dumpsys", "window", "policy")
-	if err != nil {
-		return nil // see the note above: unreadable is not a refusal
+	// ⛔⛔ BOTH SECTIONS, BECAUSE THE TWO FACTS LIVE IN DIFFERENT ONES. The
+	// wakefulness is in `dumpsys power` and the keyguard is in `dumpsys window
+	// policy`, which I learned by READING THE PHONE rather than from the crash
+	// transcript: the first version of this grepped only `window policy` for
+	// `mWakefulness=Dozing`, a string that section never prints, and would have
+	// passed a phone that was asleep at that moment.
+	var text string
+	for _, section := range [][]string{
+		{"shell", "dumpsys", "power"},
+		{"shell", "dumpsys", "window", "policy"},
+	} {
+		out, err := adb(ctx, device, section...)
+		if err != nil {
+			continue // see the note above: unreadable is not a refusal
+		}
+		text += string(out)
 	}
-	why := lockedBecause(string(out))
+	why := lockedBecause(text)
 	if len(why) == 0 {
 		return nil
 	}
 	return fmt.Errorf("%s is not usable: %s.\n\n"+
-		"⛔ UNLOCK THE PHONE AND LEAVE IT ON. Android does not credit a locked "+
+		"⛔ WAKE AND UNLOCK THE PHONE, AND LEAVE IT ON. Android does not credit a locked "+
 		"application as foreground, so the host's own service start is refused and the "+
 		"probe dies before it measures anything. There is no flag for this and there "+
 		"should not be: the platform is right and the phone is the thing to change.\n"+
@@ -254,22 +267,44 @@ func awake(ctx context.Context, device string) error {
 		device, strings.Join(why, " and "), device)
 }
 
-// lockedBecause names every reason one dumpsys section gives for a phone being
+// lockedBecause names every reason the dumpsys output gives for a phone being
 // unusable, and is separate from [awake] so it can be tested without a phone.
 //
-// ⛔ BOTH CONDITIONS ARE READ, NOT ONE. A dark screen and an unlocked-but-
-// covered one each refuse a service start on their own, and reading only the
-// wakefulness passes on a phone that then refuses. They are returned together
-// because a person told "its screen is off" who then unlocks and is told "it is
-// locked" has been sent round twice for one problem.
+// ⛔ BOTH CONDITIONS ARE READ, NOT ONE. An asleep phone and an awake-but-locked
+// one each refuse a service start on their own, and reading only the wakefulness
+// passes on the second. They are returned together, because a person told "it is
+// asleep" who then wakes it and is told "it is locked" has been sent round twice
+// for one problem.
+//
+// ⛔⛔ AND EVERY STRING HERE WAS READ OFF THE PHONE, not taken from the crash
+// transcript. Measured on a Pixel 11 Pro Fold on 2026-10-11, asleep and locked:
+//
+//	dumpsys power          mWakefulness=Dozing        mIsInteractive: false
+//	dumpsys window policy  showing=true               inputRestricted=true
+//	                       interactiveState=INTERACTIVE_STATE_SLEEP
+//	                       screenState=SCREEN_STATE_ON   ← always-on display
+//
+// Three things that transcript corrects. `mWakefulness` is in `dumpsys power`
+// and NOT in `window policy`, which the first version of this grepped alone.
+// `isKeyguardShowing` appears in neither — the keyguard says `showing=true`
+// inside its own delegate block. And `screenState` is ON while the phone sleeps,
+// so a check on the screen would have called this phone usable.
 func lockedBecause(dumpsys string) []string {
 	var why []string
 	for _, c := range []struct {
 		say   string
 		signs []string
 	}{
-		{"its screen is off", []string{"mScreenOnFully=false", "Dozing", "mAwake=false"}},
-		{"it is locked", []string{"isKeyguardShowing=true", "mShowingLockscreen=true"}},
+		{"it is asleep", []string{
+			"mWakefulness=Dozing", "mWakefulness=Asleep",
+			"mIsInteractive: false", "INTERACTIVE_STATE_SLEEP",
+		}},
+		// inputRestricted is the keyguard's own word for what it is doing, and
+		// it is what makes the application not foreground. isKeyguardShowing is
+		// kept for the releases that print it.
+		{"it is locked", []string{
+			"inputRestricted=true", "isKeyguardShowing=true", "mShowingLockscreen=true",
+		}},
 	} {
 		for _, s := range c.signs {
 			if strings.Contains(dumpsys, s) {
