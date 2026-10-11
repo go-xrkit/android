@@ -405,15 +405,51 @@ func TestTheStreamSeamsRunAgainstARealDescriptor(t *testing.T) {
 	ep := isoEndpoint(3072)
 	slot := newURBSlot(ep, ep.ISOPacketSize())
 
-	if err := submitURB(h.fd, slot); !errors.Is(err, syscall.ENOTTY) {
-		t.Errorf("submitURB on a memfd = %v, want ENOTTY", err)
+	if err := submitURB(h.fd, slot); !refusedByTheKernel(err) {
+		t.Errorf("submitURB on a memfd = %v, want a refusal", err)
 	}
-	if _, err := reapURB(h.fd); !errors.Is(err, syscall.ENOTTY) {
-		t.Errorf("reapURB on a memfd = %v, want ENOTTY", err)
+	if _, err := reapURB(h.fd); !refusedByTheKernel(err) {
+		t.Errorf("reapURB on a memfd = %v, want a refusal", err)
 	}
-	if err := discardURB(h.fd, slot); !errors.Is(err, syscall.ENOTTY) {
-		t.Errorf("discardURB on a memfd = %v, want ENOTTY", err)
+	if err := discardURB(h.fd, slot); !refusedByTheKernel(err) {
+		t.Errorf("discardURB on a memfd = %v, want a refusal", err)
 	}
+}
+
+// refusedByTheKernel reports whether err is a refusal that came from a real
+// syscall, which is the whole of what a seam test can assert here.
+//
+// ⛔⛔ IT DOES NOT DEMAND ENOTTY, AND THE REASON IS MEASURED RATHER THAN
+// GUESSED. USBDEVFS_DISCARDURB is _IO('U', 11) = 0x550b, and qemu-user has that
+// number in its own ioctl table: it unmarshals a usbdevfs_urb from the guest
+// pointer before the kernel is ever reached, and answers EFAULT. Four
+// architectures, the same four calls, /dev/zero:
+//
+//	arch              0x550b     0x5563, 0x5a01, 0x8004550f
+//	amd64 (native)    ENOTTY     ENOTTY
+//	ppc64le (qemu)    ENOTTY     ENOTTY
+//	s390x (qemu)      EFAULT     ENOTTY
+//	riscv64 (qemu)    EFAULT     ENOTTY
+//
+// So it is THAT ONE NUMBER and not "an ioctl qemu does not know" — the three
+// unknown ones fall through to the kernel on every lane. ppc64le escapes
+// because PowerPC encodes _IOC differently (_IOC_NONE is 1, not 0), so 0x550b
+// is not that command there and qemu's table does not match it.
+//
+// ⚠ AND THAT IS WORTH KNOWING FOR A SECOND REASON: this package computes
+// asm-generic _IOC encodings unconditionally, which is right for every
+// architecture Android runs on and wrong for PowerPC, MIPS and SPARC. Those are
+// cross-build lanes here and never hosts, so nothing is broken — but a usbfs
+// ioctl number is not portable arithmetic, and the ppc64le column above is what
+// that looks like from the outside.
+//
+// What the assertion keeps is the thing the seam exists to prove: the body ran
+// a syscall and SURFACED the errno rather than swallowing it. A bare
+// `err != nil` would not — it cannot tell a refusal from a nil-pointer panic
+// recovered somewhere, so the error must be an errno, and a non-zero one.
+func refusedByTheKernel(err error) bool {
+	var errno syscall.Errno
+	return errors.As(err, &errno) && errno != 0
 }
 
 func TestAStreamReusesOneImage(t *testing.T) {
