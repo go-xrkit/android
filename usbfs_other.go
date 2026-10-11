@@ -25,6 +25,10 @@ func OpenUSB(_ context.Context, d USBDevice) (*USBHandle, error) {
 // Name is the device node this handle was opened for.
 func (h *USBHandle) Name() string { return h.name }
 
+// Detached returns the interfaces whose kernel driver this handle took away.
+// Off Android there are none.
+func (h *USBHandle) Detached() []int { return nil }
+
 // Descriptors reads the device's raw descriptor blob.
 func (h *USBHandle) Descriptors() (USBDescriptors, error) { return nil, ErrUnsupported }
 

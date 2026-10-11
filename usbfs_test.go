@@ -292,3 +292,33 @@ func TestADescriptorTooShortForItsOwnTypeIsSkipped(t *testing.T) {
 		t.Fatalf("a 4-byte endpoint descriptor was read as %v", got[0].Endpoints)
 	}
 }
+
+// ⛔⛔ wMaxPacketSize IS NOT A SIZE on a high-speed isochronous endpoint. This
+// is the arithmetic that cost a day: the raw field was passed as a packet
+// length, the kernel answered EMSGSIZE, and that was published as the platform
+// REFUSING isochronous transfers.
+func TestISOPacketSizeDecodesTheTransactionsPerMicroframe(t *testing.T) {
+	for _, c := range []struct {
+		raw  int
+		want int
+		why  string
+	}{
+		{0x1400, 3072, "the Beast's camera, alternate 6: 1024 x 3"},
+		{0x0400, 1024, "one transaction, so size and bytes agree"},
+		{0x0C00, 2048, "1024 x 2"},
+		{1023, 1023, "a size with no multiplier bits set"},
+		{0, 0, "nothing at all"},
+	} {
+		e := USBEndpoint{Address: 0x81, Attributes: 0x05, MaxPacketSize: c.raw}
+		if got := e.ISOPacketSize(); got != c.want {
+			t.Errorf("ISOPacketSize(%#x) = %d, want %d — %s", c.raw, got, c.want, c.why)
+		}
+	}
+	// The one that matters: the decoded value must DIFFER from the raw field on
+	// the endpoint this package was written for.
+	beast := USBEndpoint{Address: 0x81, Attributes: 0x05, MaxPacketSize: 5120}
+	if beast.ISOPacketSize() == beast.MaxPacketSize {
+		t.Fatal("5120 decoded to itself; the multiplier bits were not read, and a request " +
+			"built from this would be refused with EMSGSIZE")
+	}
+}

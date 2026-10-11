@@ -35,10 +35,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-xrkit/android"
@@ -142,12 +144,25 @@ func run(ctx context.Context, args []string) int {
 	// Java API cannot do at all and that nothing documents for usbfs.
 	say("")
 	if err := h.SubmitISO(ep); err != nil {
-		say("ANSWER NO — the kernel refused the isochronous request: %v", err)
-		say("RESULT this phone will not let an ordinary application read that camera by " +
-			"any route. camera2 does not offer it, UsbDeviceConnection cannot submit " +
-			"isochronous transfers, and usbfs refuses them here too. Head tracking from " +
-			"the headset's camera is NOT POSSIBLE on this device without a privileged " +
-			"component.")
+		// ⛔⛔ A MALFORMED REQUEST IS NOT A REFUSAL, AND THIS SAID IT WAS. The
+		// first run printed "the kernel refused" on EMSGSIZE, which came from
+		// passing wMaxPacketSize where the bytes-per-interval belonged — our
+		// own bug, announced as the platform's verdict. The errno is the only
+		// thing that tells the two apart, so it decides what this prints.
+		switch {
+		case errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EACCES):
+			say("ANSWER NO — the kernel REFUSED the isochronous request: %v", err)
+			say("RESULT an ordinary application may not read this camera by any route: " +
+				"camera2 does not offer it, UsbDeviceConnection cannot submit " +
+				"isochronous transfers, and usbfs refuses them here too.")
+		default:
+			say("ANSWER UNKNOWN — not accepted, and NOT because it was refused: %v", err)
+			say("RESULT that is a malformed request rather than a verdict. EMSGSIZE, "+
+				"EINVAL and ENODEV all come from WHAT WAS ASKED rather than from "+
+				"whether it was allowed. The endpoint carries %d bytes an interval "+
+				"(wMaxPacketSize %d decoded); fix the request and ask again.",
+				ep.ISOPacketSize(), ep.MaxPacketSize)
+		}
 		return 1
 	}
 	say("ANSWER YES — the kernel ACCEPTED an isochronous request on endpoint %#02x",
@@ -158,6 +173,17 @@ func run(ctx context.Context, args []string) int {
 		iface.Number, iface.Alternate)
 	say("⚠ ACCEPTED IS NOT STREAMING. This submitted one request and cancelled it; it " +
 		"says the kernel takes the call, not that pixels arrive.")
+	// ⛔⛔ SAY WHAT WAS TAKEN FROM THE REST OF THE PHONE. Claiming the streaming
+	// interface detaches uvcvideo, and USBDEVFS_CONNECT does not reliably put
+	// it back: the ioctl succeeds and the driver still does not rebind. A probe
+	// that left the camera half dismantled without a word would be worse than
+	// one that failed.
+	if d := h.Detached(); len(d) > 0 {
+		say("⛔ INTERFACE %v WAS TAKEN FROM uvcvideo and the reconnect does not restore "+
+			"the binding on this phone: /dev/video0 survives on the control interface, "+
+			"but the streaming one is left with no driver. UNPLUG AND REPLUG the headset "+
+			"to give it back to the system.", d)
+	}
 	return 0
 }
 
