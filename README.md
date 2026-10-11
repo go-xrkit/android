@@ -756,36 +756,69 @@ nothing to read"**, and a census that could not tell *unreachable* from
 *reachable and silent* would be worth little — the 2026-09-07 finding is that
 the headset says nothing about its orientation, not that nothing can be asked.
 
-### ⛔ usbfs was the last route, and it is shut by the permission, not the kernel
+### ⭐ usbfs WORKS, on an unrooted phone
 
 The census said the frames are behind usbfs, so `cmd/xrusb` goes and asks. It
 takes four steps and reports which one the kernel stopped at: open, read the
 descriptors, claim the interface, select the alternate, and then submit one
 isochronous request — the thing `UsbDeviceConnection` cannot do at all.
 
-**It never gets past the first step**, and not for the reason anybody would
-guess. `UsbManager.requestPermission` answers **not granted in six to twenty
-milliseconds and shows no dialog** — watched on the screen, not only in a log.
-It answers the same way from a service and from a visible, focused, resumed
-Activity.
-
-And the permission is **already granted**, by the attach route (`device_filter`
-in the manifest, accepted once on a replug). The system's own records and its
-own API disagree:
+Measured on a **Pixel 11 Pro Fold, Android 17, no root**:
 
 ```
-our host:   myUid=10350  deviceName=/dev/bus/usb/001/003  hasPermission=false
+TARGET usb /dev/bus/usb/001/003 0c45:6368 "Sonix Technology Co., Ltd." "USB 2.0 Camera"
+STEP 1 open                  OK — the host lent the kernel's descriptor
+STEP 2 read descriptors      OK — 1424 bytes, 0c45:6368 class 0xef/0x02/0x01
+       streaming on interface 1 alternate 6, ep 0x81 in isochronous max 5120 interval 1
+STEP 3 claim interface 1     OK — taken from whatever driver held it
+STEP 4 select alternate 6    OK — bandwidth reserved
 
-dumpsys usb:
-  permissions_manager={ user_permissions={ user_id=0
-    device_permissions={ device_name=/dev/bus/usb/001/003  uids=10350 } } }
+ANSWER YES — the kernel ACCEPTED an isochronous request on endpoint 0x81
 ```
 
-Same uid, same device node, and `hasPermission` says false. Ruled out along the
-way, each by measurement: the `PendingIntent` being immutable or stale, the ask
-coming from a service, a remembered refusal (`user_permissions` was empty before
-the grant), the app being in a standby bucket (it is `ACTIVE`), the screen being
-locked, and `usb_data_status` (it is `enabled`).
+⚠ **Accepted is not streaming.** The probe submits one request and cancels it:
+that says the kernel takes the call, not that pixels arrive. What remains is a
+UVC implementation — the probe/commit negotiation, frame assembly from the
+packet descriptors, and decoding the format — and none of it is written. But
+nothing of it is blocked any more.
+
+### ⛔⛔ Three walls were reported here as platform limits. All three were OUR BUGS
+
+This section said, at length and with measurements beside it, that no route
+existed and that head tracking needed a privileged component. **That was wrong,
+three times over**, and each mistake has the same shape: an operation was never
+attempted, and the thing that stood in for it was believed.
+
+| what was written | what it actually was |
+|---|---|
+| *"`UsbManager` will not hand over the descriptor"* | **`openDevice` was never called.** The code gated on `hasPermission`, which answers `false` on this phone while `dumpsys usb` records the grant for the same uid and the same node. A predicate that disagrees with the operation is a predicate, not a verdict |
+| *"`permission denied` reading the descriptors"* | the descriptors were read by **reopening** `/proc/self/fd/N`. Reopening `/dev/bus/usb/…` is exactly what an application may not do — and the whole point of being handed a descriptor is that the open already happened |
+| *"the kernel refuses isochronous transfers"* | `EMSGSIZE`. **`wMaxPacketSize` is not a size** on a high-speed isochronous endpoint: bits 10:0 are the packet, bits 12:11 the additional transactions per microframe. `5120` is `0x1400` → `1024 × 3 = 3072`. The raw field was passed, and the kernel said *"message too long"* — which was printed as a refusal |
+
+And `EBUSY` on the claim — the kernel's own `uvcvideo` holding the interface —
+is answered by `USBDEVFS_DISCONNECT`, which needs no privilege and is what
+libusb's `detach_kernel_driver` does. `USBHandle.Close` reconnects it, because a
+detached interface takes `/dev/video0` away from the whole phone.
+
+**⛔ The probe itself told the lie, and that is the worst of it.** It printed
+*"the kernel refused"* for `EMSGSIZE`. It now switches on the errno: `EPERM` and
+`EACCES` are verdicts, everything else is a malformed request, and it says
+which.
+
+### What that costs to believe again
+
+Every claim in this file about something being impossible was made with a
+measurement beside it, and three of them were still wrong — because the
+measurement answered a question about **our code** and was read as an answer
+about the platform. Before writing that a platform forbids something:
+
+1. **attempt the operation.** A capability predicate is a hint; the call is the
+   authority. `hasPermission` said no and `openDevice` said yes;
+2. **read the errno, not the failure.** `EPERM` is a refusal. `EMSGSIZE`,
+   `EINVAL`, `ENODEV` and `EBUSY` are all statements about the request;
+3. **look for a working third party.** Play Store apps read UVC cameras on
+   unrooted phones. That fact was available the whole time and would have
+   refuted the conclusion on its own.
 
 ### ⭐ And the reason the descriptor is never handed over: the KERNEL OWNS IT
 
@@ -819,25 +852,22 @@ FIRST. There is no `avc: denied` for a `video_device` in the log at all, so
 SELinux was never consulted. "SELinux would block it" was the prediction; the
 measurement is simpler and more final than that.
 
-### Every route, and the different reason each one is shut
+### The four routes, and which one works
 
-| route | why it is shut |
+| route | state |
 |---|---|
-| **camera2** | no external-camera HAL publishes the device; the list is identical before and after |
-| **UsbDeviceConnection** | every streaming endpoint is isochronous, which it cannot submit |
-| **usbfs** | `UsbManager` will not hand over a device a kernel driver owns, and `uvcvideo` owns it |
-| **/dev/video0** | owned `system:camera`, and `CAMERA` grants no supplementary group any more |
+| **camera2** | **shut.** No external-camera HAL publishes the device; the list is identical before and after |
+| **UsbDeviceConnection** | **shut.** Every streaming endpoint is isochronous, which the Java API cannot submit |
+| **/dev/video0** | **shut.** Owned `system:camera`, and `CAMERA` grants no supplementary group any more |
+| **usbfs** | ⭐ **OPEN.** `openDevice` hands the descriptor over, `USBDEVFS_DISCONNECT` takes the interface from `uvcvideo`, and the kernel accepts an isochronous request |
 
-**So head tracking from the headset's camera needs a privileged component on
-this phone** — a vendor HAL, a system app, or root. Nothing an ordinary
-application can do reaches those frames, and each of the four routes is shut for
-its own measured reason.
+The first three are measured refusals and stand. The fourth is the one that
+works, and it took three self-inflicted walls to find.
 
-### What is written anyway, and why it was worth writing
+### What is written, and what is not
 
-The probe and the layer under it are kept, because the one thing they measure
-cheaply is which step fails — and because the parts most likely to be wrong
-silently are now pinned:
+`cmd/xrusb` and the layer under it go as far as "the kernel accepts the
+request". The parts most likely to be silently wrong are pinned:
 
 - the **ioctl numbers are computed** from this package's own mirrors of the
   kernel's structs, and the suite asserts the results against the values
@@ -848,13 +878,17 @@ silently are now pinned:
   mapping is a table rather than a function that can fail, because a transfer
   type is two bits and an error return there would be a branch no input can
   reach — which the coverage gate found;
-- the descriptors are read with a plain `read(2)`, which needs nothing beyond
-  the open, so a failure there is the descriptor being useless and every later
-  failure is narrowed to the ioctl that produced it.
+- **`wMaxPacketSize` is decoded, not passed.** `USBEndpoint.ISOPacketSize`
+  multiplies the low eleven bits by the transactions per microframe. The raw
+  field cost a day: the kernel answered `EMSGSIZE` and it was published as a
+  refusal;
+- the descriptors are read with `pread(2)` **on the lent descriptor**, never by
+  reopening a path to it.
 
-⛔ **And the probe is honest about what an accepted request would mean.** It
-submits one and cancels it: that says the kernel takes the call, not that pixels
-arrive. The two are different findings and the transcript says which it has.
+What is **not** written: the UVC probe/commit negotiation, frame assembly from
+the packet descriptors, and format decoding. `go-xrkit/xrkit/headflow` is
+waiting behind them, already measured at 1.14 % residual — so the remaining work
+is ordinary, with no platform question left in it.
 
 ## Input
 
@@ -1128,11 +1162,51 @@ application from another module; the flags are the same ones
 but cgo is not enabled"* — and CI asserts both halves of that, so the day Go
 lifts the restriction is a red build rather than a silent one.
 
+## Running a probe on a device
+
+```sh
+go run ./tools/xrrun -app ./cmd/xrusb -args '-wait 30s' -perms android.permission.CAMERA
+```
+
+That is one command for what used to be seven, and it is in Go because **the
+mistakes were in the incantation rather than in the code under test**: a
+transcript read before it was written and reported as "the probe said nothing";
+a stale APK measured because the install was skipped; an argument string the
+shell split so that `am` read `5m` as its target package and started nothing.
+Each cost a cycle and one of them cost a wrong conclusion.
+
+It waits for the **transcript file** rather than for a duration, notices a
+**crash** instead of timing out on one, refuses to choose when two devices are
+listed — wireless `adb` lists the same phone twice — and finds the SDK and JDK
+itself rather than demanding two exports. `host/build.sh` stays a script,
+because `aapt2`, `javac`, `d8`, `zipalign` and `apksigner` in a row have no
+decisions in them.
+
+⚠ **`cmd/xrusb` leaves a debt.** Claiming the camera's streaming interface
+detaches `uvcvideo`, and `USBDEVFS_CONNECT` does **not** put it back on this
+phone — the ioctl succeeds and the driver still does not rebind:
+
+```
+before:  1-1.1:1.0 driver=uvcvideo   1-1.1:1.1 driver=uvcvideo
+after:   1-1.1:1.0 driver=uvcvideo   1-1.1:1.1 driver=
+```
+
+`/dev/video0` survives on the control interface, but the streaming one is left
+with no driver until the headset is **unplugged and plugged back**.
+`USBHandle.Detached` reports what was taken, `Close` returns a reconnect it
+could not make — it used to swallow it — and the probe says so in its
+transcript. Taking something from the whole phone and saying nothing is worse
+than failing.
+
 ## Testing
 
 `100.0%` statement coverage, gated in CI on **both** lanes — the Linux transport
 and the off-Android stub. A stub nobody tests is a stub that panics the day
 somebody links it.
+
+⚠ And a portable function whose only test is on one lane is **uncovered on the
+other**, which is how `ISOPacketSize` — the arithmetic that cost a day — came to
+be tested on Linux alone. The gate caught it from the darwin side.
 
 The transport is `//go:build linux`, and Android *is* Linux, so the suite runs
 against a **fake host over a real socket, a real memfd and a real SCM_RIGHTS
@@ -1234,9 +1308,13 @@ glasses on its USB-C port. What that device answered, and nothing more:
   The person wearing them [saw colour and saw it
   move](#what-the-witness-reported), which is the only evidence this half of the
   package can have;
-- and the headset's CAMERA is reachable through neither Android API on this
-  phone — no external camera2 device, every UVC streaming endpoint isochronous.
-  See [the census](#following-a-head-the-census-and-the-answer-it-gave).
+- and the headset's **camera is reachable through usbfs**, on an unrooted phone:
+  the descriptor is lent, `uvcvideo` is detached from the streaming interface,
+  and the kernel **accepts an isochronous request**. Neither Android camera API
+  offers it — no external camera2 device, and the Java USB API cannot submit
+  isochronous transfers — so usbfs is the one route. See
+  [the census](#following-a-head-the-census-and-the-answer-it-gave) and
+  [what came of it](#-usbfs-works-on-an-unrooted-phone).
 
 ```
 TARGET display 13 "VITURE Beast" 1920x1080 @110dpi 60Hz (presentation)
@@ -1305,14 +1383,13 @@ Deliberate, and stated rather than hidden:
   `ACCESS_LOCAL_NETWORK` — mandatory from Android 17 for anything that accepts
   an incoming connection. The commands sidestep it by writing transcripts, which
   is why they work at all; making one reachable is unwritten;
-- **head tracking on Android needs a PRIVILEGED component on this phone**, and
-  the measurement says why rather than the plan saying when. All FOUR routes are
-  shut, each for its own reason: camera2 publishes no external device,
-  UsbDeviceConnection cannot submit isochronous transfers, `UsbManager` will not
-  hand over a device `uvcvideo` owns, and /dev/video0 is `system:camera` while
-  `CAMERA` grants no supplementary group. See
-  [above](#-every-route-and-the-different-reason-each-one-is-shut). `cmd/xrusb`
-  and the layer under it are written and tested; they stop at step one;
+- **head tracking on Android is UNFINISHED, not blocked.** usbfs reaches the
+  headset's camera on an unrooted phone — the kernel accepts an isochronous
+  request, measured — and what is missing is the UVC probe/commit negotiation,
+  frame assembly and format decoding. See
+  [above](#-usbfs-works-on-an-unrooted-phone). Three earlier entries here said
+  it was impossible; all three were our own bugs, and that story is kept because
+  it is the more useful half;
 - **nobody has read a pixel back off the glasses, and nobody can.** An ordinary
   application may not capture a display it does not own, so
   [`Screen`](#painting-on-the-glasses-from-go) can report how many frames the

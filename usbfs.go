@@ -91,6 +91,35 @@ var (
 	// usbdevfsDiscardURB cancels one that has not completed. It carries
 	// nothing, so it has no size and no direction.
 	usbdevfsDiscardURB = ioc(iocNone, 11, 0)
+
+	// usbdevfsIoctl carries ANOTHER ioctl down to one interface's driver. It is
+	// the only route to disconnect and reconnect, which userspace may not issue
+	// directly.
+	//
+	// ⛔ IT IS _IOWR, NOT _IOR. The kernel writes back through it, and the
+	// direction bits are part of the number: getting them wrong names a
+	// different command rather than failing.
+	usbdevfsIoctl = ioc(iocRead|iocWrite, 18, ioctlArgSize)
+)
+
+// The codes carried INSIDE usbdevfsIoctl. They are values in a struct rather
+// than commands this process issues, which is why they are plain small numbers.
+const (
+	// usbdevfsDisconnect detaches whatever kernel driver holds an interface.
+	//
+	// ⭐ IT IS WHY EBUSY IS NOT THE END. A UVC camera is held by the kernel's
+	// own uvcvideo, so CLAIMINTERFACE answers "device or resource busy" —
+	// measured on a Pixel 11 Pro Fold. This is the documented way out, the one
+	// libusb's detach_kernel_driver takes: no root, no policy change, and
+	// reversible.
+	usbdevfsDisconnect = 22
+	// usbdevfsConnect gives the interface back to the kernel.
+	//
+	// ⚠ IT IS MORE THAN GOOD MANNERS. Detaching uvcvideo takes /dev/video0
+	// away from the whole phone for as long as this process holds the
+	// interface, so a process that exited without reconnecting would leave the
+	// camera unusable to everything until it was unplugged.
+	usbdevfsConnect = 23
 )
 
 // URB transfer types, from usbdevice_fs.h. They are NOT the same numbering as
@@ -138,9 +167,20 @@ func urbTypeFor(t USBTransferType) int {
 // read from a kernel is a thing a test can hold.
 type USBDescriptors []byte
 
-// MinDescriptorBytes is the smallest a descriptor blob can be and still hold a
-// device descriptor. Anything shorter is a short read rather than a device.
-const MinDescriptorBytes = 18
+// Bounds on a descriptor blob.
+const (
+	// MinDescriptorBytes is the smallest a blob can be and still hold a device
+	// descriptor. Anything shorter is a short read rather than a device.
+	MinDescriptorBytes = 18
+
+	// MaxDescriptorBytes bounds how much is read from a descriptor.
+	//
+	// ⛔ A READ LOOP WITH NO CEILING IS A READ LOOP. usbfs serves a few hundred
+	// bytes, and 64 KiB is far past any real device -- but the thing on the
+	// other end is a descriptor this process was handed, and a kernel that kept
+	// answering would otherwise be read until memory ran out.
+	MaxDescriptorBytes = 64 << 10
+)
 
 // Device reports the device descriptor's own fields: the vendor and product
 // ids, and the device's class triple.
@@ -260,6 +300,14 @@ type (
 		AltSetting uint32
 	}
 
+	// usbdevfsIoctlArg is struct usbdevfs_ioctl: an ioctl addressed to one
+	// interface's driver rather than to the device.
+	usbdevfsIoctlArg struct {
+		Ifno      int32
+		IoctlCode int32
+		Data      uintptr
+	}
+
 	// usbdevfsISOPacketDesc is struct usbdevfs_iso_packet_desc: one packet of
 	// an isochronous request, which the kernel fills in on completion.
 	usbdevfsISOPacketDesc struct {
@@ -295,4 +343,5 @@ const (
 	urbSize          = int(unsafe.Sizeof(usbdevfsURB{}))
 	pointerSize      = int(unsafe.Sizeof(uintptr(0)))
 	isoPacketSize    = int(unsafe.Sizeof(usbdevfsISOPacketDesc{}))
+	ioctlArgSize     = int(unsafe.Sizeof(usbdevfsIoctlArg{}))
 )

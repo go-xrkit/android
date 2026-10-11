@@ -589,10 +589,26 @@ public final class XrWallService extends Service {
                     + " myPid=" + android.os.Process.myPid()
                     + " deviceName=" + dev.getDeviceName()
                     + " hasPermission=" + um.hasPermission(dev));
-            if (um.hasPermission(dev)) {
-                lendUsbDevice(um, dev);
+            // ⛔⛔ TRY OPENING IT. DO NOT ASK A PREDICATE WHETHER YOU MAY.
+            //
+            // This was gated on hasPermission, which answers FALSE on this
+            // phone while the platform's own records say the permission IS
+            // granted:
+            //
+            //   our host:  hasPermission=false  for uid 10350, .../001/003
+            //   dumpsys:   device_permissions={ device_name=.../001/003
+            //                                   uids=10350 }
+            //
+            // Hours went into asking why requestPermission refused, and the one
+            // operation that settles it was never attempted. openDevice either
+            // hands back a connection or null, and IT is the authority: a
+            // predicate that disagrees with the operation is a predicate, not a
+            // verdict. Asking comes second, and only if opening really fails.
+            if (openAndLend(um, dev)) {
                 return;
             }
+            Log.i(TAG, "openDevice refused " + name + " outright; asking for permission");
+
             // The answer comes back as a broadcast. The receiver unregisters
             // itself: a connection that asked twice would otherwise leave one
             // behind per attempt, and the second answer would be delivered to
@@ -652,13 +668,39 @@ public final class XrWallService extends Service {
          * platform drops the device when it is closed, and the descriptor in
          * the application would then name nothing.
          */
+        /**
+         * Opens the device and lends its descriptor, reporting whether it
+         * worked WITHOUT raising an error.
+         *
+         * <p>It is separate from {@link #lendUsbDevice} because the first
+         * attempt is allowed to fail quietly: a null connection there means
+         * "ask the user", not "give up", and an error sent on the wire would
+         * end the application's request before the asking had begun.
+         */
+        private boolean openAndLend(android.hardware.usb.UsbManager um,
+                android.hardware.usb.UsbDevice dev) {
+            android.hardware.usb.UsbDeviceConnection c = um.openDevice(dev);
+            if (c == null) {
+                return false;
+            }
+            lend(c, dev);
+            return true;
+        }
+
         private void lendUsbDevice(android.hardware.usb.UsbManager um,
                 android.hardware.usb.UsbDevice dev) {
             android.hardware.usb.UsbDeviceConnection c = um.openDevice(dev);
             if (c == null) {
-                error(0, "openDevice", "the platform would not open " + dev.getDeviceName());
+                error(0, "openDevice", "the platform would not open " + dev.getDeviceName()
+                        + " even after the permission was granted");
                 return;
             }
+            lend(c, dev);
+        }
+
+        /** Hands an open connection's descriptor over; see the ownership note. */
+        private void lend(android.hardware.usb.UsbDeviceConnection c,
+                android.hardware.usb.UsbDevice dev) {
             usb = c;
             android.os.ParcelFileDescriptor pfd =
                     android.os.ParcelFileDescriptor.adoptFd(c.getFileDescriptor());

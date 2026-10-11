@@ -58,3 +58,14 @@ func TestAUSBHandleOffAndroidRefusesEverything(t *testing.T) {
 		t.Fatalf("Close = %v, want nil", err)
 	}
 }
+
+// ⛔ THE DEBT IS REPORTED EVERYWHERE, EVEN WHERE IT CANNOT BE INCURRED. A
+// caller that shares a camera asks what was taken from the system; answering
+// nil off Android is right, answering by panicking is not.
+func TestDetachedOffAndroid(t *testing.T) {
+	t.Parallel()
+	var h USBHandle
+	if got := h.Detached(); got != nil {
+		t.Fatalf("Detached = %v on a platform with no USB host", got)
+	}
+}

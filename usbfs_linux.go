@@ -8,21 +8,57 @@ package android
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
 	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 // Indirections the suite replaces to reach the branches a real kernel will not
 // produce on demand. ioctl is the one that matters: every question this file
 // asks is an ioctl, and the ANSWER being a refusal is the expected outcome.
 var (
-	ioctl   = rawIoctl
-	readAll = os.ReadFile
+	ioctl           = rawIoctl
+	readDescriptors = preadAll
 )
+
+// preadAll reads a descriptor's whole contents from offset zero.
+//
+// ⛔⛔ IT READS THE DESCRIPTOR, NOT A PATH TO IT. This was os.ReadFile on
+// /proc/self/fd/N, which REOPENS the file — and reopening /dev/bus/usb/… is
+// exactly what an Android application may not do:
+//
+//	STOPPED at descriptors: open /proc/self/fd/6: permission denied
+//
+// The whole point of being handed a descriptor over SCM_RIGHTS is that the open
+// already happened, in a component allowed to make it. Going back through the
+// filesystem throws that away and asks for the permission again — from the one
+// process that cannot have it.
+//
+// pread rather than read, so the file offset is left alone: the ioctls that
+// follow share this descriptor.
+func preadAll(fd int) ([]byte, error) {
+	out := make([]byte, 0, 1024)
+	buf := make([]byte, 1024)
+	for off := int64(0); off < MaxDescriptorBytes; {
+		n, err := unix.Pread(fd, buf, off)
+		if n > 0 {
+			out = append(out, buf[:n]...)
+			off += int64(n)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if n < len(buf) {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: more than %d descriptor bytes", ErrBadPayload, MaxDescriptorBytes)
+}
 
 func rawIoctl(fd int, req uintptr, arg unsafe.Pointer) error {
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), req, uintptr(arg))
@@ -50,6 +86,11 @@ type USBHandle struct {
 	closed bool
 	// claimed is the interfaces to release on Close, in the order taken.
 	claimed []int
+	// detached is the interfaces whose kernel driver was disconnected to get
+	// them. Close reconnects every one: /dev/video0 is gone for the WHOLE PHONE
+	// while they are detached, so leaving them that way would make the camera
+	// unusable to everything until it was unplugged.
+	detached []int
 	// session is the connection the host lent the descriptor over. It is held
 	// open because the HOST holds the UsbDeviceConnection: dropping the socket
 	// lets the host release the device, and the descriptor here then names
@@ -101,6 +142,26 @@ func OpenUSB(ctx context.Context, d USBDevice) (*USBHandle, error) {
 // Name is the device node this handle was opened for.
 func (h *USBHandle) Name() string { return h.name }
 
+// Detached returns the interfaces whose kernel driver this handle took away.
+//
+// ⛔⛔ IT IS NOT BOOKKEEPING, IT IS A DEBT. Taking a UVC streaming interface
+// from uvcvideo is what makes the route work at all, and USBDEVFS_CONNECT does
+// NOT reliably undo it: on a Pixel 11 Pro Fold the reconnect ioctl SUCCEEDS and
+// the driver still does not rebind —
+//
+//	before:  1-1.1:1.0 driver=uvcvideo   1-1.1:1.1 driver=uvcvideo
+//	after:   1-1.1:1.0 driver=uvcvideo   1-1.1:1.1 driver=
+//
+// /dev/video0 survives, because the control interface still carries it, but the
+// streaming interface is left with no driver until the device is UNPLUGGED AND
+// PLUGGED BACK. A caller that shares the camera with anything else on the phone
+// needs to know that, which is why this is reported rather than hidden.
+func (h *USBHandle) Detached() []int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]int(nil), h.detached...)
+}
+
 // Descriptors reads the device's raw descriptor blob.
 //
 // ⭐ IT IS A PLAIN read(2), NOT AN IOCTL. usbfs serves the descriptors as the
@@ -115,7 +176,7 @@ func (h *USBHandle) Descriptors() (USBDescriptors, error) {
 	if closed {
 		return nil, ErrClosed
 	}
-	b, err := readAll(fmt.Sprintf("/proc/self/fd/%d", fd))
+	b, err := readDescriptors(fd)
 	if err != nil {
 		return nil, fmt.Errorf("android: reading the USB descriptors of %s: %w", h.name, err)
 	}
@@ -137,11 +198,35 @@ func (h *USBHandle) ClaimInterface(n int) error {
 		return ErrClosed
 	}
 	arg := uint32(n)
-	if err := ioctl(h.fd, usbdevfsClaimInterface, unsafe.Pointer(&arg)); err != nil {
+	err := ioctl(h.fd, usbdevfsClaimInterface, unsafe.Pointer(&arg))
+	if errors.Is(err, syscall.EBUSY) {
+		// ⭐ EBUSY IS NOT A REFUSAL, IT IS AN OCCUPANT. A UVC camera is held by
+		// the kernel's own uvcvideo, which publishes /dev/video0 from it —
+		// measured on a Pixel 11 Pro Fold, and exactly where the probe stopped.
+		// Detaching is the documented way past it, needs no privilege at all,
+		// and [USBHandle.Close] puts the driver back.
+		if derr := h.driverIoctl(n, usbdevfsDisconnect); derr != nil {
+			return fmt.Errorf("android: interface %d of %s is held by a kernel driver that "+
+				"would not let go: %w (claiming it reported %w)", n, h.name, derr, err)
+		}
+		h.detached = append(h.detached, n)
+		err = ioctl(h.fd, usbdevfsClaimInterface, unsafe.Pointer(&arg))
+	}
+	if err != nil {
 		return fmt.Errorf("android: claiming interface %d of %s: %w", n, h.name, err)
 	}
 	h.claimed = append(h.claimed, n)
 	return nil
+}
+
+// driverIoctl sends one command to the driver bound to an interface, which is
+// how disconnect and reconnect are reached: neither has a number userspace may
+// issue on its own.
+//
+// The caller holds h.mu.
+func (h *USBHandle) driverIoctl(iface, code int) error {
+	arg := usbdevfsIoctlArg{Ifno: int32(iface), IoctlCode: int32(ioc(iocNone, code, 0))}
+	return ioctl(h.fd, usbdevfsIoctl, unsafe.Pointer(&arg))
 }
 
 // SetAltSetting selects an alternate setting of an interface. For a UVC
@@ -174,9 +259,13 @@ func (h *USBHandle) SetAltSetting(iface, alt int) error {
 // allowed" with "the camera was streaming", which are different findings.
 func (h *USBHandle) SubmitISO(endpoint USBEndpoint) error {
 	typ := urbTypeFor(endpoint.Type())
-	if endpoint.MaxPacketSize <= 0 {
-		return fmt.Errorf("%w: endpoint %#02x has a maximum packet size of %d",
-			ErrInvalidOption, endpoint.Address, endpoint.MaxPacketSize)
+	// ⛔ THE DECODED SIZE, NOT THE RAW FIELD. See USBEndpoint.ISOPacketSize:
+	// passing wMaxPacketSize had the kernel answer EMSGSIZE, which reads as a
+	// refusal and was not one.
+	packet := endpoint.ISOPacketSize()
+	if packet <= 0 {
+		return fmt.Errorf("%w: endpoint %#02x carries %d bytes an interval",
+			ErrInvalidOption, endpoint.Address, packet)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -189,7 +278,7 @@ func (h *USBHandle) SubmitISO(endpoint USBEndpoint) error {
 	// allocations would put the packets wherever Go put them and the kernel
 	// would read whatever follows the URB.
 	n := ISOPacketsPerURB
-	buf := make([]byte, endpoint.MaxPacketSize*n)
+	buf := make([]byte, packet*n)
 	raw := make([]byte, urbSize+isoPacketSize*n)
 	u := (*usbdevfsURB)(unsafe.Pointer(&raw[0]))
 	u.Type = uint8(typ)
@@ -199,7 +288,7 @@ func (h *USBHandle) SubmitISO(endpoint USBEndpoint) error {
 	u.NumberOfPackets = int32(n)
 	for i := 0; i < n; i++ {
 		p := (*usbdevfsISOPacketDesc)(unsafe.Pointer(&raw[urbSize+isoPacketSize*i]))
-		p.Length = uint32(endpoint.MaxPacketSize)
+		p.Length = uint32(packet)
 	}
 	if err := ioctl(h.fd, usbdevfsSubmitURB, unsafe.Pointer(&raw[0])); err != nil {
 		return fmt.Errorf("android: submitting an isochronous request to endpoint %#02x "+
@@ -227,14 +316,38 @@ func (h *USBHandle) Close() error {
 		return nil
 	}
 	h.closed = true
-	fd, claimed := h.fd, h.claimed
+	fd, claimed, detached := h.fd, h.claimed, h.detached
 	h.mu.Unlock()
 
 	for _, n := range claimed {
 		arg := uint32(n)
 		_ = ioctl(fd, usbdevfsReleaseInterface, unsafe.Pointer(&arg))
 	}
-	err := closeFD(fd)
+	// ⛔⛔ GIVING THE DRIVER BACK IS THE PART THAT MUST BE REPORTED. Releasing a
+	// claim affects nobody else; leaving an interface DETACHED leaves the
+	// phone's camera half dismantled — /dev/video0 still present because the
+	// control interface is bound, and the streaming interface with no driver at
+	// all:
+	//
+	//	1-1.1:1.0 driver=uvcvideo
+	//	1-1.1:1.1 driver=              ← measured, after a Close that returned nil
+	//
+	// This was `_ = ioctl(…)`. A reconnect that failed silently left the device
+	// in that state and reported success, which is the worst of both: the
+	// damage is to something SHARED, and nothing said so. The first failure is
+	// now returned, and every interface is still attempted.
+	var first error
+	for _, n := range detached {
+		arg := usbdevfsIoctlArg{Ifno: int32(n), IoctlCode: int32(ioc(iocNone, usbdevfsConnect, 0))}
+		if err := ioctl(fd, usbdevfsIoctl, unsafe.Pointer(&arg)); err != nil && first == nil {
+			first = fmt.Errorf("android: interface %d of %s was taken from its kernel driver "+
+				"and could not be given back (%w); that interface is left with no driver "+
+				"until the device is unplugged", n, h.name, err)
+		}
+	}
+	if err := closeFD(fd); err != nil && first == nil {
+		first = err
+	}
 	h.session.shutdown(ErrClosed)
-	return err
+	return first
 }

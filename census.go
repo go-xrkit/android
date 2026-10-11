@@ -158,6 +158,25 @@ func (e USBEndpoint) In() bool { return e.Address&0x80 != 0 }
 // Type is the endpoint's transfer type.
 func (e USBEndpoint) Type() USBTransferType { return USBTransferType(e.Attributes & 0x3) }
 
+// ISOPacketSize is how many bytes one isochronous service interval may carry.
+//
+// ⛔⛔ wMaxPacketSize IS NOT A SIZE ON A HIGH-SPEED ISOCHRONOUS ENDPOINT. Bits
+// 10:0 are the packet size; bits 12:11 are the number of ADDITIONAL
+// transactions per microframe, so the bytes per interval are the product. The
+// Beast's camera advertises 5120 on its largest alternate, which is 0x1400:
+//
+//	size = 0x1400 & 0x7ff       = 1024
+//	mult = ((0x1400>>11) & 3)+1 = 3
+//	bytes per interval          = 3072
+//
+// Passing the raw 5120 as a packet length had the kernel answer EMSGSIZE —
+// "message too long" — and that was read here as the platform REFUSING the
+// transfer. It was refusing nothing: the request was malformed. This is the
+// trap libusb's get_max_iso_packet_size exists to hide.
+func (e USBEndpoint) ISOPacketSize() int {
+	return (e.MaxPacketSize & 0x7ff) * (((e.MaxPacketSize >> 11) & 0x3) + 1)
+}
+
 // String renders the endpoint for logs.
 func (e USBEndpoint) String() string {
 	dir := "out"
