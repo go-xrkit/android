@@ -1044,12 +1044,48 @@ boundaries: 11 toggle(s), 11 EOF bit(s); the dropped frames were short by
 the losses ended on: 11 toggle(s), 1 EOF bit(s)
 ```
 
-Every loss ends on a **FID toggle** and almost none on an EOF. So the
-end-of-frame bit is ending the real frames correctly, and the camera is sending
-same-identifier packets *after* it — opening a frame that only the next toggle
-can close, 8 % full, which is then rightly dropped. **That is the open
-question**, and the census is what turns it from "slow" into something with an
-address.
+Every loss ends on a **FID toggle** and almost none on an EOF, so the
+end-of-frame bit is ending the real frames correctly and the fragments are
+frames the camera began and never finished.
+
+#### ⭐⭐ And the byte budget says why: the camera under-fills every interval
+
+Worked through from the numbers of that same run, and it **closes**:
+
+| | |
+|---|---|
+| packets a second | **7759** of 8000 high-speed intervals — **97 % of the schedule** |
+| bytes in each | **832** of the **2400** it committed to — **34.7 % full** |
+| so, delivered | **6.45 MB/s, which is 10.5 frames a second of data** |
+| needed for 25 fps | **1920** bytes an interval — *under* the allowance |
+| 10 whole frames + 12 fragments | 6 144 000 + 702 160 = **6 846 160 bytes, the measured total** |
+
+So **no packets are being lost at all** — 97 % of the schedule arrives — and the
+frame rate is bounded by *how much the camera puts in each packet*. Nothing in
+this code is in the way, which is the opposite of what a dropped-frame counter
+suggests.
+
+⛔ **Two of my own explanations died here, and measurement killed both.** That the
+ring was too shallow: refuted by sixteen requests delivering the same ten frames.
+That the *consumer* starved it: refuted by a benchmark —
+
+```
+BenchmarkDecodeAFrame/640x480     0.25–0.43 ms/frame   0 allocs
+BenchmarkAssembleAFrame            0.08–0.15 ms/frame   1 alloc
+```
+
+⚠ taken under load average 121, which this fleet has a rule against, and the
+numbers spread accordingly. The conclusion survives it because it is an
+order-of-magnitude question rather than a close one: a hole of 32 ms cannot be
+explained by 0.3 ms of work.
+
+**The prediction that follows**: a smaller frame should reach the full rate.
+320×240 at 25 fps needs **480 bytes an interval**, well inside the 832 measured,
+and `MinTrackingWidth` is 320 so `headflow` still accepts it — four-wide bins
+make eighty of them. `cmd/xrusb -width 320` is one run. The descriptor table says
+the same thing from the other side: the camera advertises **MJPEG at 30 fps for
+every size** and YUY2 at 25 only at 640×480 and below, which is exactly what a
+fixed byte budget looks like once the frames are compressed.
 
 ⭐ **The ring depth is not the cause, and a control says so rather than a story.**
 Deepening it looked obviously right: a 640×480 YUY2 frame at 2400 bytes an
