@@ -51,6 +51,14 @@ func main() { os.Exit(run(context.Background(), os.Args[1:])) }
 func run(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("xrusb", flag.ContinueOnError)
 	wait := fs.Duration("wait", 5*time.Minute, "how long to wait for a UVC camera to appear")
+	// ⭐ A FLAG BECAUSE THE QUESTION IS A SWEEP, not a setting. The byte budget
+	// of the 640x480 run closes on the camera UNDER-FILLING each interval —
+	// 832 bytes of the 2400 it committed to, 34.7% — which is 10.5 frames a
+	// second of data and is exactly what came out. 25 fps at 640x480 needs 1920
+	// bytes an interval; 320x240 needs 480. So a smaller frame should reach the
+	// full rate, and that is a prediction rather than a preference.
+	width := fs.Int("width", 0, "force a frame width (0 picks the fastest above "+
+		"MinTrackingWidth, which is what a real caller gets)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -174,7 +182,19 @@ func run(ctx context.Context, args []string) int {
 		say("STEP 6 pick                  FAILED: %v", perr)
 		return 1
 	}
-	say("STEP 6 pick                  %s %s", want.Format, size)
+	if *width > 0 {
+		w, z, ok := frameAtWidth(formats, *width)
+		if !ok {
+			say("STEP 6 pick                  FAILED: no format offers a %d-pixel-wide "+
+				"frame; the table above is what the camera has", *width)
+			return 1
+		}
+		want, size = w, z
+		say("STEP 6 pick                  %s %s (forced by -width %d)",
+			want.Format, size, *width)
+	} else {
+		say("STEP 6 pick                  %s %s", want.Format, size)
+	}
 
 	neg, nerr := h.Negotiate(iface.Number, want, size)
 	if nerr != nil {
@@ -451,6 +471,39 @@ func reportV4L2(say func(string, ...any)) {
 // is the one a real stream would want — and because it is the one most likely to
 // be refused for bandwidth, which is a different refusal from being refused for
 // permission and worth telling apart.
+// frameAtWidth finds the fastest frame of exactly the given width, preferring
+// the formats this package can read without a decoder.
+//
+// ⚠ IT LIVES HERE AND NOT IN THE LIBRARY. A real caller wants the policy
+// [android.PickFormat] implements; this is an instrument for one sweep, and a
+// library that grew a knob for every experiment would be a library of knobs.
+func frameAtWidth(fs []android.UVCFormatDesc, w int) (android.UVCFormatDesc,
+	android.UVCFrameSize, bool) {
+	for _, prefer := range []android.UVCFormat{android.FormatYUY2, android.FormatMJPEG} {
+		for _, f := range fs {
+			if f.Format != prefer {
+				continue
+			}
+			var best android.UVCFrameSize
+			found := false
+			for _, z := range f.Sizes {
+				if z.Width != w {
+					continue
+				}
+				// Fastest means the SHORTEST interval, which is the largest
+				// frame rate: the interval is in 100ns units.
+				if !found || (z.Interval > 0 && z.Interval < best.Interval) {
+					best, found = z, true
+				}
+			}
+			if found {
+				return f, best, true
+			}
+		}
+	}
+	return android.UVCFormatDesc{}, android.UVCFrameSize{}, false
+}
+
 func streamingEndpoint(ifaces []android.USBInterface) (android.USBInterface, android.USBEndpoint, bool) {
 	var bi android.USBInterface
 	var be android.USBEndpoint

@@ -199,9 +199,18 @@ func (a *FrameAssembler) Losses() (onToggle, onEOF int) {
 
 // Feed takes one payload and returns a whole frame's bytes when one completed.
 //
-// The bytes are BORROWED: they are valid until the next Feed, which starts
-// writing the following frame over them. A caller that keeps a frame copies it,
-// and [FrameAssembler.Decode] does.
+// ⛔⛔ THE BYTES ARE THE CALLER'S, AND THIS COMMENT USED TO SAY THE OPPOSITE. It
+// claimed they were borrowed until the next Feed; [FrameAssembler.complete]
+// hands the buffer over and allocates a fresh one, so a completed frame stays
+// valid for as long as the caller keeps it. The code was the safer of the two
+// and the promise was the wrong one — which matters, because that ownership is
+// exactly what makes [UVCStream]'s queue of pending frames legal. A reader who
+// trusted the old sentence would have read that queue as a use-after-free.
+//
+// ⚠ It costs one allocation a frame, measured at 611 KB and under 0.15 ms at
+// 640x480 — two orders of magnitude below the frame interval, which is why it
+// is spent rather than pooled. A free list would buy nothing here and would put
+// an ownership bug where there is now none.
 func (a *FrameAssembler) Feed(p UVCPayload) ([]byte, bool) {
 	if p.Bad() {
 		// The camera says this packet is wrong. Whatever frame it belongs to is
