@@ -45,6 +45,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/go-appdirs/outdir"
 )
 
 // pkg is the APK this repository builds, and the one host/build.sh defaults to.
@@ -80,6 +82,7 @@ type options struct {
 	patience time.Duration
 	build    bool
 	install  bool
+	pull     bool
 }
 
 func run(ctx context.Context, argv []string) error {
@@ -92,6 +95,13 @@ func run(ctx context.Context, argv []string) error {
 	fs.DurationVar(&o.patience, "patience", 3*time.Minute, "how long to wait for the transcript")
 	fs.BoolVar(&o.build, "build", true, "build the APK first")
 	fs.BoolVar(&o.install, "install", true, "install it")
+	// ⭐ THE FRAMES COME BACK, AND WHERE THEY LAND IS NOT A PREFERENCE. A frame
+	// from a headset's camera is a picture of a room and whoever is in it. The
+	// choice of directory belongs to go-appdirs/outdir, which already owns this
+	// question for the fleet: somewhere durable, outside every work tree, with
+	// the path resolved first — a capture directory reached through a symbolic
+	// link found no .git in an earlier copy of this rule and was accepted.
+	fs.BoolVar(&o.pull, "pull", false, "bring back any PNG frames the probe wrote")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -176,9 +186,68 @@ func run(ctx context.Context, argv []string) error {
 	}
 	fmt.Println()
 	fmt.Print(text)
+	// ⛔ THE FRAMES COME BACK BEFORE THE VERDICT IS ACTED ON. A run that ends in
+	// FAIL is exactly the one whose pictures somebody wants to look at, and
+	// returning first would leave them on the phone.
+	if o.pull {
+		if err := pullFrames(ctx, o); err != nil {
+			fmt.Fprintln(os.Stderr, "xrrun:", err)
+		}
+	}
 	if strings.Contains(text, "FAIL") || strings.Contains(text, "STOPPED") {
 		return errors.New("the probe did not finish its measurement; the transcript is above")
 	}
+	return nil
+}
+
+// pullFrames brings the probe's PNG frames back, into a directory that is
+// durable and is not in any work tree.
+//
+// ⛔⛔ WHERE THEY LAND IS THE WHOLE POINT, AND IT IS NOT THIS FILE'S DECISION.
+// A frame from a headset's camera is a picture of a room and whoever is in it,
+// and this fleet has already written a capture of a whole desktop into a public
+// repository's testdata/. go-appdirs/outdir owns the question — durable, outside
+// every work tree, path RESOLVED first, because a directory reached through a
+// symbolic link found no .git in an earlier hand-rolled copy of the rule and was
+// accepted. /tmp on macOS is such a link.
+func pullFrames(ctx context.Context, o options) error {
+	dir, err := outdir.Ensure(outdir.Spec{
+		App: "go-xrkit-android",
+		Env: "XRKIT_FRAME_DIR",
+		Sub: "frames",
+	})
+	if err != nil {
+		return fmt.Errorf("choosing somewhere to put the frames: %w", err)
+	}
+	// run-as is how the app's private directory is readable at all; see
+	// android.SaveTranscript for why the frames are in there and not in the
+	// external one. `adb pull` cannot reach it, so each file is read out.
+	out, err := adb(ctx, o.device, "shell", "run-as", pkg, "ls", "files")
+	if err != nil {
+		return err
+	}
+	names := strings.Fields(string(out))
+	pulled := 0
+	for _, name := range names {
+		if !strings.HasPrefix(name, "frame-") || !strings.HasSuffix(name, ".png") {
+			continue
+		}
+		raw, err := adb(ctx, o.device, "exec-out", "run-as", pkg, "cat", "files/"+name)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), raw, 0o600); err != nil {
+			return err
+		}
+		pulled++
+	}
+	if pulled == 0 {
+		fmt.Printf("==> no frames to bring back (the probe writes them with -keep)\n")
+		return nil
+	}
+	fmt.Printf("==> %d frame(s) in %s\n", pulled, dir)
+	fmt.Printf("    they are pictures of a room: they are outside every work tree, and " +
+		"deleting them when you are done is the whole of the hygiene\n")
 	return nil
 }
 
