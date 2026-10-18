@@ -62,6 +62,7 @@ const activity = pkg + "/org.goxrkit.android.XrDemoActivity"
 // like too.
 var transcripts = map[string]string{
 	"xrusb":     "usb.txt",
+	"xrhead":    "head.txt",
 	"xrcam":     "camera.txt",
 	"xrscreen":  "screen.txt",
 	"xrglasses": "glasses.txt",
