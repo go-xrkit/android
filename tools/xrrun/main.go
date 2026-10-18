@@ -200,6 +200,53 @@ func run(ctx context.Context, argv []string) error {
 	return nil
 }
 
+// safeFrameName reports whether a name the DEVICE supplied may be used as a
+// filename here.
+//
+// ⛔⛔ THE NAMES COME FROM THE PHONE, AND THE FIRST VERSION OF THIS TOOL JOINED
+// THEM TO A PATH AFTER CHECKING ONLY A PREFIX AND A SUFFIX. That is a path
+// traversal, and it was measured rather than reasoned about:
+//
+//	"frame-/../../../tmp/x.png"                 -> …/Application Support/tmp/x.png
+//	"frame-/../../../../../../etc/cron.d/x.png" -> /Users/etc/cron.d/x.png
+//
+// Both pass "begins with frame-, ends with .png", because `frame-` is a path
+// element and the `..` that follow are their own. A real filesystem cannot
+// produce a basename containing a separator — but these arrive over `adb shell
+// ls` from a device, across a WIRELESS link, and the write happens with the
+// person's own privileges on their own workstation. A tool that pulls files off
+// a device must treat their names as input.
+//
+// ⚠ IT IS TWO CHECKS AND NOT ONE, deliberately: the name must be a single path
+// element, AND the joined path must still be inside the directory. The second
+// does not trust the first, because the first is a rule about strings and the
+// second is a question about the filesystem — and it is the second that would
+// catch a case neither of us thought of.
+func safeFrameName(name string) bool {
+	if !strings.HasPrefix(name, "frame-") || !strings.HasSuffix(name, ".png") {
+		return false
+	}
+	// One path element: no separator, and nothing a cleaner would rewrite.
+	return name == filepath.Base(name) && !strings.ContainsRune(name, '/') &&
+		!strings.ContainsRune(name, filepath.Separator) && name != ".." && name != "."
+}
+
+// insideDir reports whether path is within dir, which is the check that does not
+// trust the name at all.
+// ⚠ STRICTLY WITHIN: the directory itself is not a place a FILE can go, so "."
+// is refused along with ".." and anything above. And an error from Rel — which
+// is what comparing a relative path with an absolute one gives — reads as "not
+// inside" rather than as "inside", because a comparison that could not be made
+// is not a yes.
+func insideDir(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." &&
+		!strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // pullFrames brings the probe's PNG frames back, into a directory that is
 // durable and is not in any work tree.
 //
@@ -229,14 +276,23 @@ func pullFrames(ctx context.Context, o options) error {
 	names := strings.Fields(string(out))
 	pulled := 0
 	for _, name := range names {
-		if !strings.HasPrefix(name, "frame-") || !strings.HasSuffix(name, ".png") {
+		if !safeFrameName(name) {
 			continue
 		}
 		raw, err := adb(ctx, o.device, "exec-out", "run-as", pkg, "cat", "files/"+name)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", name, err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, name), raw, 0o600); err != nil {
+		// ⛔ AND THE JOINED PATH IS CHECKED, not just the name. See safeFrameName:
+		// the two checks are independent on purpose, and this is the one that
+		// asks the filesystem rather than the string.
+		out := filepath.Join(dir, name)
+		if !insideDir(dir, out) {
+			return fmt.Errorf("the device offered a frame called %q, which lands at %q "+
+				"— outside the directory chosen for it. Nothing was written",
+				name, out)
+		}
+		if err := os.WriteFile(out, raw, 0o600); err != nil {
 			return err
 		}
 		pulled++

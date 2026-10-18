@@ -124,6 +124,30 @@ func TestSaveFrameRefusesWhatItCannotWrite(t *testing.T) {
 	// platform and for every user, with no permission model involved at all.
 	// TestSaveTranscriptReportsADirectoryItCannotWriteTo next door already did
 	// it this way, and reading it first would have saved both.
+	// ⛔⛔ A NAME IS A FILENAME AND NOT A PATH. These are the exact strings that
+	// walked out of the chosen directory in the companion tool, found by an audit
+	// of the change that introduced them: a prefix-and-suffix check passes them,
+	// because `frame-` is one path element and the `..` that follow are their
+	// own.
+	t.Run("a name that is a path", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		for _, name := range []string{
+			"frame-/../../../tmp/x.png",
+			"frame-/../../../../../../etc/cron.d/x.png",
+			"frame-../../x.png",
+			"../frame-001.png",
+			"sub/frame-001.png",
+			"..",
+			".",
+			"",
+		} {
+			if _, err := android.SaveFrame(name, bars(8, 8)); !errors.Is(err,
+				android.ErrInvalidOption) {
+				t.Errorf("SaveFrame(%q) = %v, want ErrInvalidOption", name, err)
+			}
+		}
+	})
+
 	t.Run("a directory that is not there", func(t *testing.T) {
 		t.Setenv("HOME", filepath.Join(t.TempDir(), "not-there"))
 		if _, err := android.SaveFrame("frame-001.png", bars(8, 8)); err == nil {
