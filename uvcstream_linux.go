@@ -24,14 +24,45 @@ import (
 // endpoint is scheduled every microframe whether anybody is listening: between
 // reaping one request and submitting the next, the camera's packets go nowhere.
 //
-// ⚠ AND FOUR IS WHERE MEASUREMENT LEFT IT, not where arithmetic wanted it. Four
-// requests of [StreamPacketsPerURB] packets cover four milliseconds, while a
-// 640x480 YUY2 frame at 2400 bytes an interval takes thirty-two — so deepening
-// the ring looked obviously right. Sixteen requests delivered exactly the same
-// 10 frames (7968 packets against 7744), and raising the packets per request
-// instead made the camera stop sending altogether. The ring depth is not what
-// bounds this; see [StreamPacketsPerURB] for the numbers and the control.
-const StreamURBs = 4
+// ⛔⛔ AND SIXTEEN IS MEASURED, AGAINST FOUR WHICH HALVED THE FRAME RATE. This
+// was 4 for five releases on the strength of an experiment with a CHEAP consumer
+// where deepening the ring changed nothing — an experiment that was right about
+// its own conditions and wrong as a general conclusion. With a consumer costing
+// more than the ring covers, the ring is dry while it works and the packets that
+// arrive then are gone. Measured on a Pixel 11 Pro Fold with cmd/xrhead, which
+// spends 4.8 ms a frame decoding and tracking:
+//
+//	requests   fps     dropped
+//	       4   10.5    79
+//	       8   21.5    14
+//	      16   23.8     0      <- this
+//	      32    0       the camera stops sending
+//
+// 23.8 fps against the 25 the camera advertises, and nothing dropped. Thirty-two
+// fails the same way thirty-two PACKETS a request does; both axes have a ceiling
+// of their own and neither is their product, since 4x32 and 16x8 are both 128
+// packets and only one of them works.
+//
+// ⛔ WHAT THIS CORRECTS IS A PUBLISHED CONCLUSION. This repository said "~10 fps
+// is the camera's ceiling, flat across a fourfold change in pixel count", and
+// the byte budget behind it said the camera filled 34.7 % of each interval. The
+// budget closed; the causal reading was backwards. The camera under-filled
+// because NOTHING WAS ASKING — at sixteen requests the same camera fills 77 %.
+const StreamURBs = 16
+
+// MaxPendingFrames is how many assembled frames may wait for the caller.
+//
+// ⛔ IT USED TO BE [StreamURBs], WHICH WAS A COINCIDENCE RATHER THAN A REASON.
+// This ceiling answers "how stale may a frame be before it is worthless", which
+// is a question about the CONSUMER — head tracking wants the freshest picture —
+// and has nothing to do with how many requests are in flight. Borrowing the
+// ring's depth meant that raising the ring silently made the shedding branch
+// unreachable, which the coverage gate caught the moment the ring went to
+// sixteen.
+//
+// Four, because a consumer four frames behind at 24 fps is already 170 ms late
+// and a fifth frame would not help it.
+const MaxPendingFrames = 4
 
 // A UVCStream is a running camera.
 //
@@ -358,7 +389,7 @@ func (s *UVCStream) drain(slot *urbSlot) {
 	// is head tracking: the FRESHEST frame is the one worth having, and a stale
 	// one delivered late is worse than none. Dropped frames are counted, so a
 	// caller that is too slow can SEE that it is.
-	for len(s.pending) > StreamURBs {
+	for len(s.pending) > MaxPendingFrames {
 		s.pending = s.pending[1:]
 		s.late++
 	}
