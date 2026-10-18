@@ -700,6 +700,11 @@ with it, but publishes no orientation at all — measured three ways on
 the yaw from the headset's **camera** instead, at 1.14 % residual over a
 there-and-back sweep.
 
+⭐⭐ **On Android it now does too, measured**: a worn left-right sweep came back
+as 197.9° of travel — out to −52°, back through zero, out to +80° — through
+usbfs on an unrooted phone. See the stream section below for the whole chain and
+for what it costs.
+
 On macOS that camera is an AVFoundation device and the matter ends there. On
 Android it was not obvious an application could reach it at all, and there are
 exactly two routes — so this package **asks** rather than guessing:
@@ -1095,6 +1100,36 @@ call, and the run confirms it rather than merely permitting it.
 answers it: choosing which screen somebody faces is comfortable at 107 ms, and
 this is 100. Holding a picture locked to the head at 1:1 wants under 20 ms and
 was already out of reach.
+
+### ⭐⭐⭐ And a real head turn, measured end to end
+
+2026-10-18, the Beast worn and plugged into the phone, a left-right sweep. 30
+frames captured with `xrusb -keep 30`, pulled back with `xrrun -pull`, replayed
+through `headflow` by `go-xrkit/xrkit/cmd/headflowreplay`:
+
+| frames | yaw |
+|---|---|
+| 2 → 9 | 0° → **−52°** |
+| 9 → 17 | back through **0.000°** |
+| 17 → 25 | 0° → **+80°** |
+| 25 → 30 | the return begins, +65.7° |
+
+**197.9° of travel in 2.9 s**, 27 of 30 frames tracked, one refused at
+confidence 0.257 — which reacquires, and loses the motion during the gap, exactly
+as that behaviour is documented.
+
+⭐⭐ **What convinces here is the SHAPE, not the number.** Out, back *through
+zero*, out the other way: that is the gesture. No reference instrument existed to
+compare an angle against, so the shape of the movement was the only oracle
+available — and a tracker that was merely noisy, or drifting, could not produce
+it.
+
+⚠ Confidence runs 0.30–0.94 and **dips at the ends of the sweep**, where the head
+moves fastest: motion blur, at 100 ms a frame. And the frames are **pictures of a
+room and of whoever is wearing the headset** — they went to the durable
+directory outside every work tree that `go-appdirs/outdir` chooses, and were
+deleted from the phone and the workstation once the measurement existed. That is
+the whole of the hygiene, and `xrrun` says so when it brings them back.
 
 #### The per-boundary census, and the diagnosis it first produced
 
