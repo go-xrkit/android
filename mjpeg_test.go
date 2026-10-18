@@ -221,6 +221,15 @@ func TestAnMJPEGFrameEndedByEOFWhileIncompleteIsAttributedToIt(t *testing.T) {
 		t.Errorf("Losses = %d on toggle, %d on EOF; want it attributed to the EOF",
 			onT, onE)
 	}
+	// ⭐⭐ AND WHICH MARKER WAS MISSING, which is what settled the device's
+	// behaviour in one run: all 67 MJPEG losses on the Beast's camera had a
+	// start-of-image and no end-of-image, so the camera marks a frame finished
+	// before its own picture is. Half a JPEG is that case exactly.
+	noStart, noEnd := a.MissingMarkers()
+	if noStart != 0 || noEnd != 1 {
+		t.Errorf("MissingMarkers = %d without a start, %d without an end; half a JPEG "+
+			"has its start and lost its tail", noStart, noEnd)
+	}
 	// ⚠ AND NOTHING IS ADDED TO THE SHORTFALL, because a compressed frame has no
 	// expected length to be short OF. A zero here is honest; a guess would be a
 	// number somebody averages.
@@ -330,6 +339,56 @@ func TestAnMJPEGStreamAssemblesByMarkersAndNotByLength(t *testing.T) {
 		t.Errorf("Losses = %d on toggle, %d on EOF; the truncated frame had no EOF "+
 			"so the toggle is what ended it", onT, onE)
 	}
+}
+
+// TestABufferThatBEGANMIDPICTUREIsToldApartFromOneThatLostItsTail.
+//
+// ⛔ THEY ARE OPPOSITE FAULTS and "dropped" cannot tell them apart. No
+// start-of-image means a boundary fired where the camera had not finished a
+// picture; a start with no end means the tail went missing. On the Beast's
+// camera every MJPEG loss was the second kind, 67 of 67, which is what made the
+// finding a statement about the camera rather than about this parser.
+func TestABufferThatBeganMidPictureIsToldApartFromOneThatLostItsTail(t *testing.T) {
+	t.Parallel()
+	const w, h = 320, 240
+	frame := jpegFrame(t, w, h, 80)
+
+	t.Run("no start: the stream was joined mid-picture", func(t *testing.T) {
+		a, err := NewFrameAssemblerFor(FormatMJPEG, w, h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The second half of a JPEG: it has the end and not the beginning.
+		tail := frame[len(frame)/2:]
+		p, err := ParsePayload(payload(2, payloadEOF, tail...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.Feed(p)
+		noStart, noEnd := a.MissingMarkers()
+		if noStart != 1 || noEnd != 0 {
+			t.Errorf("MissingMarkers = %d without a start, %d without an end; this "+
+				"buffer has no start-of-image", noStart, noEnd)
+		}
+	})
+
+	t.Run("no end: the tail went missing", func(t *testing.T) {
+		a, err := NewFrameAssemblerFor(FormatMJPEG, w, h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		head := frame[:len(frame)/2]
+		p, err := ParsePayload(payload(2, payloadEOF, head...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.Feed(p)
+		noStart, noEnd := a.MissingMarkers()
+		if noStart != 0 || noEnd != 1 {
+			t.Errorf("MissingMarkers = %d without a start, %d without an end; this "+
+				"buffer has its start and lost its tail", noStart, noEnd)
+		}
+	})
 }
 
 func TestAFormatThisPackageCannotAssembleIsRefused(t *testing.T) {

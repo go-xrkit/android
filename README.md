@@ -926,11 +926,21 @@ depends on the processor that has to fit it. Measured on this workstation:
 (YUY2 is 0.25–0.43 ms at 640×480 for comparison, from the same benchmark on the
 same machine, under load average 15.)
 
-So MJPEG is affordable up to 640×480 and **1080p at 30 fps is not** — it would
-need most of a core. ⛔ And those figures are a workstation's: an **optimistic
-bound** for the phone, not a measurement of it. `UVCStreamStats.Decoding` reports
-the real thing from the device, and `cmd/xrusb -format mjpeg` is one run. The
-default changes when that run exists, and not on the strength of a prediction.
+⛔ **And those figures are a workstation's: an optimistic bound for the phone,
+not a measurement of it.** The phone, measured through
+`UVCStreamStats.Decoding`:
+
+| | workstation | **the Pixel** |
+|---|---|---|
+| YUY2 640×480 | 0.25–0.43 ms | **3.86 ms** |
+| MJPEG 640×480 | 5.0–6.0 ms | **19.84 ms** |
+| MJPEG 320×240 | 1.04–1.09 ms | **1.0 ms** |
+
+Three and a half to ten times slower at 640×480, so MJPEG there is **60 % of a
+30 fps interval** where the Mac said 15–18 %. Keeping `PickFormat` on YUY2 until
+that run existed was the right call, and the run confirms it rather than merely
+permitting it — the camera's MJPEG is also 1.97 fps, for reasons that are the
+camera's and are set out below.
 
 ### What is written, and what is not
 
@@ -1051,10 +1061,44 @@ in 0s` is not a quiet camera: a quiet one still has its endpoint scheduled and
 still fills the wait. The reason was sitting in a discarded variable. The probe
 prints it now, and switches on the errno.
 
-### ⚠ The frame rate is 9.4 and not 25 — localised, not fixed
+### ⭐⭐ The frame rate is ~10 and not 25, and that is the CAMERA — measured three ways
 
-Twelve frames are dropped for every ten delivered. The per-boundary census says
-exactly where:
+Three runs on 2026-10-18, same phone, same session, after the phantom frames
+below were fixed:
+
+| | YUY2 640×480 | YUY2 320×240 | MJPEG 640×480 |
+|---|---|---|---|
+| delivered | **9.41 fps** | **10 fps** | **1.97 fps** |
+| dropped | 1 | **0** | 67, every one missing its tail |
+| payload the camera committed to | 2400 B | 800 B | 800 B |
+| decode, **on the phone** | 3.86 ms | 1.0 ms | **19.84 ms** |
+
+**Flat at ~10 fps across a fourfold change in pixel count.** That is the
+signature of a ceiling on the device's own frame production, not of a bandwidth
+limit — the camera lowered its byte rate with the frame size and kept the rate.
+So the prediction that a smaller frame would reach 25 fps is **refuted**: it
+reaches 10, which is what 640×480 already reached.
+
+⛔ **And MJPEG is worse on this camera, not better.** It advertises 30 fps at
+every size; it negotiates a **third** of the bandwidth (800 bytes an interval
+against YUY2's 2400) and then **truncates its own frames** — all 67 losses had a
+start-of-image and no end-of-image, so the camera marks a frame finished before
+its picture is. Ten whole JPEGs out of 77 boundaries. The descriptor's 30 fps is
+a claim, not a capability.
+
+⭐ **The decode figures are now the phone's**, and they are 3.5–10× the
+workstation's: 19.84 ms for MJPEG is **60 % of a 30 fps interval** where the Mac
+said 15–18 %. Keeping `PickFormat` on YUY2 until this run existed was the right
+call, and the run confirms it rather than merely permitting it.
+
+⚠ **What ~10 fps is enough for** is the question that matters, and `headflow`
+answers it: choosing which screen somebody faces is comfortable at 107 ms, and
+this is 100. Holding a picture locked to the head at 1:1 wants under 20 ms and
+was already out of reach.
+
+#### The per-boundary census, and the diagnosis it first produced
+
+Before the fix below, the same run read:
 
 ```
 boundaries: 11 toggle(s), 11 EOF bit(s); the dropped frames were short by
@@ -1062,9 +1106,30 @@ boundaries: 11 toggle(s), 11 EOF bit(s); the dropped frames were short by
 the losses ended on: 11 toggle(s), 1 EOF bit(s)
 ```
 
-Every loss ends on a **FID toggle** and almost none on an EOF, so the
-end-of-frame bit is ending the real frames correctly and the fragments are
-frames the camera began and never finished.
+⛔⛔ **AND THAT READING WAS WRONG — THE BUG WAS MINE.** Every one of those
+"dropped frames" was invented here. A **header-only payload** — a length, the
+bits, and nothing after them — is how a camera keeps an isochronous stream alive
+between frames. It is *not* an empty packet, so the zero-length skip never saw
+it, and it parses perfectly: opening a frame on it meant the next identifier
+toggle completed a buffer with nothing in it, once per real frame. Measured at
+320×240 on 2026-10-18, one condition changed:
+
+| | frames | dropped | toggles |
+|---|---|---|---|
+| before | 10 | **10** | 10 |
+| after | 10 | **0** | **0** |
+
+At 640×480 the same change took the dropped count from **12 to 1**, and the
+toggle count to **zero at both sizes**. *Short by exactly a whole frame* is a
+frame that carried nothing — the counters said the bus was losing half the
+frames while the bus was losing none. The diagnosis this section used to carry,
+that the camera sent same-identifier packets after its end-of-frame bit, was
+this defect reading itself back.
+
+⚠ A header-only payload **does** still end a frame that is already open: that is
+the legitimate way to close one whose data has all arrived, and ignoring it would
+hold every frame until the next toggle — a whole frame-time of latency added to
+the one method latency bounds.
 
 #### ⭐⭐ And the byte budget says why: the camera under-fills every interval
 
@@ -1097,24 +1162,30 @@ numbers spread accordingly. The conclusion survives it because it is an
 order-of-magnitude question rather than a close one: a hole of 32 ms cannot be
 explained by 0.3 ms of work.
 
-**The prediction that follows**: a smaller frame should reach the full rate.
+**The prediction this earned**: a smaller frame should reach the full rate.
 320×240 at 25 fps needs **480 bytes an interval**, well inside the 832 measured,
 and `MinTrackingWidth` is 320 so `headflow` still accepts it — four-wide bins
-make eighty of them. `cmd/xrusb -width 320` is one run. The descriptor table says
-the same thing from the other side: the camera advertises **MJPEG at 30 fps for
-every size** and YUY2 at 25 only at 640×480 and below, which is exactly what a
-fixed byte budget looks like once the frames are compressed.
+make eighty of them.
 
-⭐ **And MJPEG is now in the frame path**, which is the other half of that
-prediction — `cmd/xrusb -format mjpeg` is the second run. A compressed frame is
+⛔⛔ **IT WAS WRONG, AND THE DEVICE SAID SO.** 320×240 delivers **10 fps**, the
+same as 640×480 — because the camera committed to only **800** bytes an interval
+there, a third of what it took at 640×480. It lowered its byte rate with the
+frame size and kept the frame rate. The budget closing told us what bounded the
+*bytes*; it could not tell us the camera was choosing both numbers. See the
+three-way measurement above for what actually holds.
+
+⭐ **And MJPEG is in the frame path now**, which was the other half of the
+prediction, and it is **worse on this camera** — 1.97 fps. A compressed frame is
 whole by its **markers** and an uncompressed one by its **length**, so the
 assembler had to learn which it is holding: `NewFrameAssemblerFor` takes the
 format, and `UVCNegotiation.Kind` is where it comes from, because a negotiation
 result should say what was agreed rather than leave a stream to guess.
 
-⛔ Both runs are still **unmeasured on the device**, and neither prediction is
-reported here as a result. The byte budget earns the prediction; only the phone
-settles it.
+⚠ **What a closed byte budget does and does not buy.** It refuted two
+explanations that were wrong, which was worth the arithmetic. It then produced a
+prediction that was *also* wrong — because an identity that balances tells you
+which quantities are related, not which of them the device is holding fixed. Only
+varying one of them on the device says that.
 
 ⭐ **The ring depth is not the cause, and a control says so rather than a story.**
 Deepening it looked obviously right: a 640×480 YUY2 frame at 2400 bytes an

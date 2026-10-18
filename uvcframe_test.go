@@ -370,6 +370,95 @@ func TestALossOnAnEndOfFrameBitIsAttributedToIt(t *testing.T) {
 	}
 }
 
+// TestAPayloadWithNODATADoesNotBeginAFrame.
+//
+// ⛔⛔ IT USED TO, AND IT COST ONE PHANTOM DROPPED FRAME FOR EVERY REAL ONE. A
+// header-only payload — a length, the bits, nothing after them — is how a camera
+// keeps an isochronous stream alive between frames. It is NOT an empty packet,
+// so the stream's zero-length skip never sees it, and it parses perfectly.
+// Opening a frame on it meant the next identifier toggle completed a buffer with
+// nothing in it. Measured on a Pixel 11 Pro Fold at 320x240, 2026-10-18:
+//
+//	before   10 frames, 10 dropped, 10 toggles, short by 153600 of 153600
+//	after    10 frames,  0 dropped,  0 toggles
+//
+// Short by exactly a whole frame is a frame that carried NOTHING. The counters
+// said the bus was losing half the frames; the bus was losing none, and the
+// published diagnosis drawn from them — that the camera sent same-identifier
+// packets after its end-of-frame bit — was this bug.
+func TestAPayloadWithNoDataDoesNotBeginAFrame(t *testing.T) {
+	a, err := NewFrameAssembler(320, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole := 320 * 2 * BytesPerPixelYUY2
+
+	// A whole frame, ended by its own EOF.
+	feedFrame(t, a, false, 0x11, whole-256, 256)
+	last := make([]byte, 256)
+	for i := range last {
+		last[i] = 0x11
+	}
+	p, err := ParsePayload(payload(2, payloadEOF, last...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.Feed(p); !ok {
+		t.Fatal("a whole frame was not delivered")
+	}
+
+	// Then the keep-alive the camera actually sends: header, no data. Several of
+	// them, and then the next frame's identifier.
+	for i := 0; i < 3; i++ {
+		hdr, err := ParsePayload(payload(12, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f, ok := a.Feed(hdr); ok {
+			t.Fatalf("a header-only payload delivered a frame of %d bytes", len(f))
+		}
+	}
+	// The toggle that used to complete a phantom.
+	if _, ok := feedFrame(t, a, true, 0x22, 256, 256); ok {
+		t.Fatal("the toggle after the keep-alives delivered a frame")
+	}
+
+	if f, d, _ := a.Stats(); f != 1 || d != 0 {
+		t.Errorf("Stats = %d frames, %d dropped; want 1 and 0 — a dropped frame here "+
+			"is one this assembler invented", f, d)
+	}
+	if tg, _, short := a.Boundaries(); tg != 0 || short != 0 {
+		t.Errorf("Boundaries = %d toggle(s), %d short bytes; a keep-alive is not a "+
+			"frame and must leave no trace", tg, short)
+	}
+}
+
+// ⭐ AND A HEADER-ONLY PAYLOAD STILL ENDS A FRAME THAT IS OPEN, which is the
+// legitimate UVC way to close one whose data has all arrived. Refusing to act on
+// it would hold every frame until the next toggle — a whole frame-time of extra
+// latency on the one method latency bounds.
+func TestAHeaderOnlyPayloadStillEndsAnOpenFrame(t *testing.T) {
+	a, err := NewFrameAssembler(320, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole := 320 * 2 * BytesPerPixelYUY2
+	if _, ok := feedFrame(t, a, false, 0x33, whole, 256); ok {
+		t.Fatal("the frame completed before it was ended")
+	}
+	eof, err := ParsePayload(payload(12, payloadEOF))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, ok := a.Feed(eof)
+	if !ok {
+		t.Fatal("a header-only EOF did not end the open frame")
+	}
+	if len(frame) != whole {
+		t.Errorf("the frame is %d bytes, want %d", len(frame), whole)
+	}
+}
+
 func TestDecodeWritesLuminanceIntoEveryChannel(t *testing.T) {
 	// ⭐ GREY IS NOT A SHORTCUT HERE: headflow.Profile sums R+G+B down each
 	// column, so a grey image carries exactly what it reads and a full YUV
