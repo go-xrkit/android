@@ -319,6 +319,16 @@ type UVCNegotiation struct {
 	// Asked is what it was given, kept so a caller can SEE a change rather
 	// than infer one.
 	Asked UVCFrameSize
+	// Kind is the format's KIND, as against Format which is the camera's own
+	// index for it.
+	//
+	// ⛔ A NEGOTIATION RESULT SHOULD SAY WHAT WAS AGREED, and an index is a name
+	// the camera chose rather than a fact about the bytes that follow. Without
+	// it a stream cannot tell whether to assemble by LENGTH or by MARKERS — and
+	// that distinction is what makes a compressed frame possible at all. The
+	// alternative was a second argument on [USBHandle.Stream], which would have
+	// put the same fact in two places and let them disagree.
+	Kind UVCFormat
 }
 
 // Changed reports whether the camera settled on something other than what it

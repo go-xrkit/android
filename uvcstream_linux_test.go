@@ -145,6 +145,24 @@ func (f *fakeStream) sendFrame(fid bool, v byte, bytes_, per int) {
 	}
 }
 
+// sendJPEG queues one whole JPEG's packets, ending the last one with EOF the
+// way a camera marks a compressed frame it has finished.
+func (f *fakeStream) sendJPEG(frame []byte, fid bool) {
+	var bits byte
+	if fid {
+		bits = payloadFID
+	}
+	const per = 1024
+	for off := 0; off < len(frame); off += per {
+		end := min(off+per, len(frame))
+		b := bits
+		if end == len(frame) {
+			b |= payloadEOF
+		}
+		f.packets = append(f.packets, payload(2, b, frame[off:end]...))
+	}
+}
+
 // sendEmpty queues n packets carrying nothing, which is what the endpoint
 // delivers between frames.
 func (f *fakeStream) sendEmpty(n int) {
@@ -179,11 +197,11 @@ func TestAStreamRefusesAnEndpointThatCarriesNothing(t *testing.T) {
 	h := fakeHandle()
 	// bits 10:0 zero: a size of nothing, whatever the multiplier says.
 	ep := USBEndpoint{Address: 0x81, Attributes: 1, MaxPacketSize: 0x1800}
-	if _, err := h.Stream(UVCNegotiation{}, ep, 320, 240); !errors.Is(err, ErrInvalidOption) {
+	if _, err := h.Stream(UVCNegotiation{Kind: FormatYUY2}, ep, 320, 240); !errors.Is(err, ErrInvalidOption) {
 		t.Errorf("Stream on a zero-size endpoint = %v, want ErrInvalidOption", err)
 	}
 	// And a frame size it cannot track is refused before anything is submitted.
-	if _, err := h.Stream(UVCNegotiation{}, isoEndpoint(3072), 16, 16); !errors.Is(err, ErrInvalidOption) {
+	if _, err := h.Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), 16, 16); !errors.Is(err, ErrInvalidOption) {
 		t.Errorf("Stream on a 16x16 frame = %v, want ErrInvalidOption", err)
 	}
 }
@@ -196,7 +214,7 @@ func TestAStreamFillsTheRingBeforeItReadsAnything(t *testing.T) {
 	// called.
 	f := &fakeStream{t: t, packet: 3072}
 	f.install()
-	s, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), 320, 240)
+	s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), 320, 240)
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -223,7 +241,8 @@ func TestAStreamDeliversAFrameAndKeepsTheRingFull(t *testing.T) {
 	f.sendFrame(false, 0x5A, whole, 1024)
 	f.sendFrame(true, 0xA5, 1024, 1024)
 
-	s, err := fakeHandle().Stream(UVCNegotiation{Format: 1, Frame: 2}, isoEndpoint(3072), w, h)
+	s, err := fakeHandle().Stream(UVCNegotiation{Format: 1, Frame: 2, Kind: FormatYUY2},
+		isoEndpoint(3072), w, h)
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -284,7 +303,7 @@ func TestTwoFramesInOneRequestAreBothDelivered(t *testing.T) {
 	f.sendFrame(true, 0x22, whole, 1024)
 	f.sendFrame(false, 0x33, 1024, 1024) // ends the second
 
-	s, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), w, h)
+	s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), w, h)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +345,7 @@ func TestACallerSlowerThanTheCameraLosesTheOldestFrames(t *testing.T) {
 		f.sendFrame(i%2 == 1, byte(0x10+i), whole, whole)
 	}
 
-	s, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), w, h)
+	s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), w, h)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +397,7 @@ func TestAForeignCompletionIsSkippedAndCounted(t *testing.T) {
 	f.sendFrame(false, 0x5E, whole, 1024)
 	f.sendFrame(true, 0x5F, 1024, 1024)
 
-	s, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), w, h)
+	s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), w, h)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +529,7 @@ func TestTheKernelsMemoryIsHeldByTheDescriptorNotTheStream(t *testing.T) {
 	f := &fakeStream{t: t, packet: 3072}
 	f.install()
 	h := fakeHandle()
-	s, err := h.Stream(UVCNegotiation{}, isoEndpoint(3072), 320, 240)
+	s, err := h.Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), 320, 240)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,6 +612,107 @@ func refusedByTheKernel(err error) bool {
 	return errors.As(err, &errno) && errno != 0
 }
 
+// TestAnMJPEGStreamDeliversPicturesAndTimesItsOwnDecode.
+//
+// ⛔⛔ THE WHOLE RING HAD TO LEARN THE FORMAT, not just the assembler: a
+// compressed frame is whole by its MARKERS and an uncompressed one by its
+// LENGTH, and this path is where the two meet. It also measures what the decode
+// costs, which is the number the choice between the formats turns on and which a
+// benchmark on a workstation can only bound.
+func TestAnMJPEGStreamDeliversPicturesAndTimesItsOwnDecode(t *testing.T) {
+	const w, h = 320, 240
+	frame := jpegFrame(t, w, h, 80)
+	f := &fakeStream{t: t, packet: 3072}
+	f.install()
+	// Two whole JPEGs, each ended by its own EOF, as a camera sends them.
+	f.sendJPEG(frame, false)
+	f.sendJPEG(frame, true)
+
+	s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatMJPEG}, isoEndpoint(3072), w, h)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer s.Close()
+
+	img, err := s.Frame(streamCtx(t))
+	if err != nil {
+		t.Fatalf("Frame: %v", err)
+	}
+	// ⛔ THE BARS, NOT THE COUNT. A uniformly grey image is what a broken decode
+	// looks like to a counter, exactly as a black frame is.
+	var dark, light int
+	for i := 0; i < len(img.Pix); i += 4 {
+		if img.Pix[i] < 0x60 {
+			dark++
+		} else {
+			light++
+		}
+	}
+	if dark == 0 || light == 0 {
+		t.Fatalf("%d dark and %d light pixels: the encoded bars did not survive the "+
+			"stream", dark, light)
+	}
+
+	st := s.Stats()
+	// ⚠ NOT "ONE FRAME". Both JPEGs are small enough to complete inside a single
+	// request — the very case TestTwoFramesInOneRequestAreBothDelivered exists
+	// for — so the honest assertion is the one that ADDS UP: every frame the
+	// assembler finished is delivered, queued, or shed.
+	if st.Frames < 1 {
+		t.Fatalf("no frame was assembled (%s)", st)
+	}
+	if st.Late+len(s.pending)+1 != st.Frames {
+		t.Errorf("%d frames assembled, 1 delivered, %d queued, %d late; they must add "+
+			"up (%s)", st.Frames, len(s.pending), st.Late, st)
+	}
+	if st.Decoding <= 0 {
+		t.Errorf("Stats reports no decoding time; that number is what the choice "+
+			"between YUY2 and MJPEG turns on and nothing else can measure it on "+
+			"the processor that has to run it (%s)", st)
+	}
+	// ⚠ NO UPPER BOUND IS ASSERTED. How long a decode takes is a property of the
+	// machine, and a test that failed on a slow one would be measuring the
+	// runner. What must hold is that it was measured at all.
+	if st.BadJPEG != 0 {
+		t.Errorf("Stats reports %d bad JPEG(s) for two good ones (%s)", st.BadJPEG, st)
+	}
+}
+
+// TestAnMJPEGFrameThatWillNotDecodeDoesNotENDTheStream.
+//
+// ⛔ ONE BAD JPEG MUST NOT BE A DEAD CAMERA. The frame arrived whole — both
+// markers — and is still not a picture, which is the camera's compressor or a
+// corrupted middle. Counting it and waiting for the next frame is the only
+// answer that keeps a stream alive through one; returning the error would end it.
+func TestAnMJPEGFrameThatWillNotDecodeDoesNotEndTheStream(t *testing.T) {
+	const w, h = 320, 240
+	good := jpegFrame(t, w, h, 80)
+	ruined := jpegFrame(t, w, h, 80)
+	for i := len(jpegSOI) + 4; i < len(ruined)-len(jpegEOI)-4; i++ {
+		ruined[i] = 0x00
+	}
+	f := &fakeStream{t: t, packet: 3072}
+	f.install()
+	f.sendJPEG(ruined, false)
+	f.sendJPEG(good, true)
+	f.sendJPEG(good, false)
+
+	s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatMJPEG}, isoEndpoint(3072), w, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if _, err := s.Frame(streamCtx(t)); err != nil {
+		t.Fatalf("Frame = %v; one undecodable JPEG ended the stream", err)
+	}
+	if st := s.Stats(); st.BadJPEG != 1 {
+		t.Errorf("Stats reports %d bad JPEG(s), want 1 — and counted apart from "+
+			"Dropped, because a frame that never arrived and one that arrived and "+
+			"is not a picture are different faults (%s)", st.BadJPEG, st)
+	}
+}
+
 func TestAStreamReusesOneImage(t *testing.T) {
 	const w, h = 320, 2
 	whole := w * h * BytesPerPixelYUY2
@@ -603,7 +723,7 @@ func TestAStreamReusesOneImage(t *testing.T) {
 	}
 	f.sendFrame(false, 0xFF, 1024, 1024)
 
-	s, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), w, h)
+	s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), w, h)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -628,7 +748,7 @@ func TestAStreamWaitsRatherThanSpinning(t *testing.T) {
 	// rather than inventing a frame.
 	f := &fakeStream{t: t, packet: 3072}
 	f.install()
-	s, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), 320, 240)
+	s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), 320, 240)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -652,7 +772,7 @@ func TestAStreamWaitsRatherThanSpinning(t *testing.T) {
 func TestAStreamStopsWhenItIsClosed(t *testing.T) {
 	f := &fakeStream{t: t, packet: 3072}
 	f.install()
-	s, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), 320, 240)
+	s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), 320, 240)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +806,7 @@ func TestAStreamReportsWhatTheKernelRefuses(t *testing.T) {
 	t.Run("a submit that fails while the ring fills", func(t *testing.T) {
 		f := &fakeStream{t: t, packet: 3072, submitErrAfter: 2}
 		f.install()
-		_, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), 320, 240)
+		_, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), 320, 240)
 		if !errors.Is(err, syscall.ENODEV) {
 			t.Fatalf("Stream = %v, want the kernel's ENODEV", err)
 		}
@@ -701,7 +821,7 @@ func TestAStreamReportsWhatTheKernelRefuses(t *testing.T) {
 	t.Run("a reap that fails", func(t *testing.T) {
 		f := &fakeStream{t: t, packet: 3072, reapErr: syscall.ENODEV}
 		f.install()
-		s, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), 320, 240)
+		s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), 320, 240)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -718,7 +838,7 @@ func TestAStreamReportsWhatTheKernelRefuses(t *testing.T) {
 		f.install()
 		f.sendFrame(false, 0x7, whole, 1024)
 		f.sendFrame(true, 0x8, 1024, 1024)
-		s, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), w, h)
+		s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), w, h)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -749,7 +869,7 @@ func TestAPacketThisProcessCannotReadIsSkippedRatherThanBlamedOnTheCamera(t *tes
 	f.sendFrame(true, 0x22, whole, 1024)
 	f.sendFrame(false, 0x33, 1024, 1024)
 
-	s, err := fakeHandle().Stream(UVCNegotiation{}, isoEndpoint(3072), w, h)
+	s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), w, h)
 	if err != nil {
 		t.Fatal(err)
 	}

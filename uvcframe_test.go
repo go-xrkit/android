@@ -9,6 +9,7 @@ import (
 	"image"
 	"strings"
 	"testing"
+	"time"
 )
 
 // payload builds one isochronous packet the way a camera does: a header whose
@@ -455,10 +456,25 @@ func TestStreamStatsSayWhatHappened(t *testing.T) {
 	if got := s.String(); strings.Contains(got, "foreign") {
 		t.Errorf("String() mentions foreign completions when there were none: %q", got)
 	}
-	withForeign := s
-	withForeign.Foreign = 7
-	if got := withForeign.String(); !strings.Contains(got, "7 foreign completion(s)") {
-		t.Errorf("String() = %q, missing the foreign completions", got)
+	if got := s.String(); strings.Contains(got, "decoding") {
+		t.Errorf("String() reports a decoding time that was never measured: %q", got)
+	}
+	if got := s.String(); strings.Contains(got, "would not decode") {
+		t.Errorf("String() mentions bad JPEGs when there were none: %q", got)
+	}
+	loud := s
+	loud.Foreign = 7
+	loud.BadJPEG = 3
+	loud.Decoding = 250 * time.Millisecond
+	for _, want := range []string{
+		"7 foreign completion(s)",
+		"3 JPEG(s) that arrived whole and would not decode",
+		"250ms decoding",
+		"125ms a frame", // 250ms over the two frames
+	} {
+		if got := loud.String(); !strings.Contains(got, want) {
+			t.Errorf("String() = %q, missing %q", got, want)
+		}
 	}
 	got := s.String()
 	// ⭐ Late AND Dropped ARE BOTH NAMED, because they are different problems:

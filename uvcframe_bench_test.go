@@ -92,3 +92,52 @@ func BenchmarkAssembleAFrame(b *testing.B) {
 	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/1e6, "ms/frame")
 	b.ReportMetric(float64(perFrame), "packets/frame")
 }
+
+// BenchmarkDecodeAnMJPEGFrame: whether the decoder is affordable at the rate the
+// camera advertises.
+//
+// ⛔⛔ THIS IS THE QUESTION MJPEG HAS TO ANSWER. The camera offers 30 fps at
+// every size for MJPEG and 25 only at 640x480 and below for YUY2, and the byte
+// budget says why — it fills 832 of the 2400 bytes an interval it committed to.
+// But MJPEG trades bus bandwidth for CPU, and a decode that cost 33 ms a frame
+// would buy nothing: the frame interval at 30 fps IS 33 ms. The YUY2 path is
+// 0.25-0.43 ms for comparison, and it is in the same benchmark so the two are
+// measured by the same instrument on the same machine.
+func BenchmarkDecodeAnMJPEGFrame(b *testing.B) {
+	for _, c := range []struct {
+		name string
+		w, h int
+	}{
+		{"320x240, the smallest headflow accepts", 320, 240},
+		{"640x480, what YUY2 managed 9.4 fps of", 640, 480},
+		{"1920x1080, which MJPEG offers at 30 fps", 1920, 1080},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			a, err := NewFrameAssemblerFor(FormatMJPEG, c.w, c.h)
+			if err != nil {
+				b.Fatal(err)
+			}
+			// Quality 80 is roughly what a webcam's own encoder targets, and it
+			// is the same fixture the correctness tests use — so a reader
+			// comparing the two numbers is comparing the same bytes.
+			frame := jpegFrame(b, c.w, c.h, 80)
+			var dst *image.RGBA
+			b.SetBytes(int64(c.w * c.h * BytesPerPixelYUY2))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				dst, err = a.Decode(dst, frame)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			ms := float64(b.Elapsed().Nanoseconds()) / float64(b.N) / 1e6
+			b.ReportMetric(ms, "ms/frame")
+			// ⭐ THE HEADROOM IS THE ANSWER, not the milliseconds: a frame
+			// interval at 30 fps is 33.3 ms, and what matters is what fraction
+			// of it the decode eats.
+			b.ReportMetric(ms/33.3*100, "%-of-30fps-interval")
+			b.ReportMetric(float64(len(frame)), "jpeg-bytes")
+		})
+	}
+}
