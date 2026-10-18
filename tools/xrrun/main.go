@@ -81,7 +81,11 @@ type options struct {
 	perms    string
 	device   string
 	patience time.Duration
-	build    bool
+	// hands is how long to wait for the person who has to unlock the phone,
+	// which is a different quantity from patience: one waits for a machine and
+	// the other for somebody to come back to their desk.
+	hands   time.Duration
+	build   bool
 	install  bool
 	pull     bool
 }
@@ -94,6 +98,8 @@ func run(ctx context.Context, argv []string) error {
 	fs.StringVar(&o.perms, "perms", "", "space-separated permissions the APK should declare")
 	fs.StringVar(&o.device, "device", "", "adb device, or empty for the only one")
 	fs.DurationVar(&o.patience, "patience", 3*time.Minute, "how long to wait for the transcript")
+	fs.DurationVar(&o.hands, "hands", 3*time.Minute, "how long to wait for somebody to "+
+		"wake and unlock the phone, which no tool can do for them")
 	fs.BoolVar(&o.build, "build", true, "build the APK first")
 	fs.BoolVar(&o.install, "install", true, "install it")
 	// ⭐ THE FRAMES COME BACK, AND WHERE THEY LAND IS NOT A PREFERENCE. A frame
@@ -125,7 +131,7 @@ func run(ctx context.Context, argv []string) error {
 	// ⛔ ASKED BEFORE THE BUILD, because the build takes forty seconds and a
 	// locked phone refuses at the end of them. It is asked AGAIN below, just
 	// before the start, because a phone locks itself during a build.
-	if err := awake(ctx, o.device); err != nil {
+	if err := awaitAwake(ctx, o.device, o.hands); err != nil {
 		return err
 	}
 
@@ -174,7 +180,7 @@ func run(ctx context.Context, argv []string) error {
 		start = append(start, "--es", "args", "'"+o.args+"'")
 	}
 	fmt.Printf("==> starting %s %s\n", name, o.args)
-	if err := awake(ctx, o.device); err != nil {
+	if err := awaitAwake(ctx, o.device, o.hands); err != nil {
 		return err
 	}
 	if _, err := adb(ctx, o.device, start...); err != nil {
@@ -362,13 +368,39 @@ func waitForTranscript(ctx context.Context, o options, file string) (string, err
 // renamed between releases, and a tool that refused to run because it could not
 // find a field would be worse than the crash it is avoiding — the crash at
 // least names its own cause.
-func awake(ctx context.Context, device string) error {
-	// ⛔⛔ BOTH SECTIONS, BECAUSE THE TWO FACTS LIVE IN DIFFERENT ONES. The
-	// wakefulness is in `dumpsys power` and the keyguard is in `dumpsys window
-	// policy`, which I learned by READING THE PHONE rather than from the crash
-	// transcript: the first version of this grepped only `window policy` for
-	// `mWakefulness=Dozing`, a string that section never prints, and would have
-	// passed a phone that was asleep at that moment.
+//
+// ⛔⛔ AND THE COMMAND THIS SUGGESTS SAYS `true`, NOT `usb`, BECAUSE `usb` DID
+// NOTHING HERE. `svc power stayon usb` sets one bit of
+// `stay_on_while_plugged_in` — the USB one — and this rig does not match it.
+// Measured on the Pixel 11 Pro Fold with the glasses attached, 2026-10-18:
+//
+//	AC powered: true    USB powered: false    status: 2    level: 100
+//
+// The phone is charged through the same hub the glasses hang off and Android
+// classifies that supply as AC, so the setting read back as 2 (set, by us) while
+// the screen kept going dark on a 30-second timeout. `true` sets every source
+// (15) and holds. A suggestion that cannot work on the rig it is printed for is
+// worse than none: it reads as a fix that was tried.
+// ⛔ THE WAITING IS IN [awaitAwake] AND THE READING IN [stateOf]. There is
+// deliberately no single-shot `awake` any more: it refused the moment it was
+// called, which made the person time an unlock to a launch, and keeping it
+// beside the waiting version would leave the wrong one one letter away.
+
+// awaitAwake waits for the phone to become usable rather than refusing at once.
+//
+// ⛔⛔ BECAUSE THE ONE THING THIS GUARD DEMANDS IS A HUMAN GESTURE, AND REFUSING
+// INSTANTLY MAKES THE PERSON TIME IT TO A LAUNCH. Unlocking is a fingerprint or
+// a code: nothing here can do it, and nothing should. Measured against this rig
+// on 2026-10-18, a refusing guard cost five round trips — wake it, it locks
+// again; unlock it, the run has already exited — for one unlock. So the reason
+// is printed ONCE, and then the phone is asked again every second until it is
+// usable or the patience runs out. The refusal only happens if nobody comes.
+//
+// ⚠ `stateOf` is a variable so a test can drive this without a phone: with one
+// it would need the gesture it exists to wait for.
+var stateOf = func(ctx context.Context, device string) []string {
+	// ⛔⛔ BOTH SECTIONS, BECAUSE THE TWO FACTS LIVE IN DIFFERENT ONES — see the
+	// note on awake.
 	var text string
 	for _, section := range [][]string{
 		{"shell", "dumpsys", "power"},
@@ -376,21 +408,52 @@ func awake(ctx context.Context, device string) error {
 	} {
 		out, err := adb(ctx, device, section...)
 		if err != nil {
-			continue // see the note above: unreadable is not a refusal
+			continue // unreadable is not a refusal
 		}
 		text += string(out)
 	}
-	why := lockedBecause(text)
+	return lockedBecause(text)
+}
+
+func awaitAwake(ctx context.Context, device string, patience time.Duration) error {
+	why := stateOf(ctx, device)
 	if len(why) == 0 {
 		return nil
 	}
+	fmt.Printf("\n%v\n\n==> waiting up to %v for the phone, asking every second\n",
+		refusal(device, why), patience)
+
+	deadline := time.Now().Add(patience)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+		if why = stateOf(ctx, device); len(why) == 0 {
+			fmt.Println("==> the phone is awake and unlocked; carrying on")
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return refusal(device, why)
+		}
+	}
+}
+
+// refusal is the message, apart from the asking, so a test can read what a
+// person is told without a phone — which is how the `stayon usb` suggestion
+// went four releases without anybody noticing it could not work.
+func refusal(device string, why []string) error {
 	return fmt.Errorf("%s is not usable: %s.\n\n"+
 		"⛔ WAKE AND UNLOCK THE PHONE, AND LEAVE IT ON. Android does not credit a locked "+
 		"application as foreground, so the host's own service start is refused and the "+
 		"probe dies before it measures anything. There is no flag for this and there "+
 		"should not be: the platform is right and the phone is the thing to change.\n"+
-		"  adb -s %s shell svc power stayon usb   # keeps it awake while plugged in",
-		device, strings.Join(why, " and "), device)
+		"  adb -s %s shell svc power stayon true   # EVERY power source: this rig "+
+		"reports AC, not USB\n"+
+		"  adb -s %s shell settings get system screen_off_timeout   # 30000 here, which "+
+		"is why it dozes between a tap and a run",
+		device, strings.Join(why, " and "), device, device)
 }
 
 // lockedBecause names every reason the dumpsys output gives for a phone being
@@ -415,31 +478,83 @@ func awake(ctx context.Context, device string) error {
 // `isKeyguardShowing` appears in neither — the keyguard says `showing=true`
 // inside its own delegate block. And `screenState` is ON while the phone sleeps,
 // so a check on the screen would have called this phone usable.
+// ⛔⛔⛔ AND NOT EVERY SIGN IS A PROPERTY OF THE PHONE — THIS FOLDABLE HAS TWO
+// SCREENS. Measured on the same Pixel 11 Pro Fold on 2026-10-18, AWAKE and
+// UNLOCKED, `dumpsys power` prints one power group per screen:
+//
+//	mWakefulness=Awake                         ← the phone
+//	  Wakefulness Session Power Group powerGroupId: 0
+//	    mIsInteractive: false                  ← one screen, dark
+//	  Wakefulness Session Power Group powerGroupId: 1
+//	    mIsInteractive: true                   ← the other, in use
+//
+// and `window policy` prints `interactiveState=INTERACTIVE_STATE_SLEEP` for a
+// display of its own. A `strings.Contains` for "mIsInteractive: false" finds the
+// dark screen and declares the PHONE asleep: this guard refused an awake,
+// unlocked phone three times running and sent a person to wake a phone that was
+// already awake — the exact round trip the note above says it exists to prevent.
+//
+// So the device-wide `mWakefulness=<word>` decides, and the per-screen signs are
+// consulted only when that line is absent — and then only if NOTHING says a
+// screen is up, because one screen awake is all the platform needs to credit an
+// application as foreground.
 func lockedBecause(dumpsys string) []string {
 	var why []string
-	for _, c := range []struct {
-		say   string
-		signs []string
-	}{
-		{"it is asleep", []string{
-			"mWakefulness=Dozing", "mWakefulness=Asleep",
-			"mIsInteractive: false", "INTERACTIVE_STATE_SLEEP",
-		}},
-		// inputRestricted is the keyguard's own word for what it is doing, and
-		// it is what makes the application not foreground. isKeyguardShowing is
-		// kept for the releases that print it.
-		{"it is locked", []string{
-			"inputRestricted=true", "isKeyguardShowing=true", "mShowingLockscreen=true",
-		}},
+	if asleep(dumpsys) {
+		why = append(why, "it is asleep")
+	}
+	// inputRestricted is the keyguard's own word for what it is doing, and it is
+	// what makes the application not foreground. isKeyguardShowing is kept for
+	// the releases that print it. These ARE device-wide: there is one keyguard.
+	for _, s := range []string{
+		"inputRestricted=true", "isKeyguardShowing=true", "mShowingLockscreen=true",
 	} {
-		for _, s := range c.signs {
-			if strings.Contains(dumpsys, s) {
-				why = append(why, c.say)
-				break
-			}
+		if strings.Contains(dumpsys, s) {
+			why = append(why, "it is locked")
+			break
 		}
 	}
 	return why
+}
+
+// asleep says whether the WHOLE phone is asleep.
+func asleep(dumpsys string) bool {
+	if state, ok := wakefulness(dumpsys); ok {
+		return state == "Dozing" || state == "Asleep"
+	}
+	// No such line: a renamed section, so fall back to the per-screen signs, and
+	// only when none of them contradicts. ⚠ A phone whose screens disagree is
+	// NOT asleep — see the note above.
+	down := strings.Contains(dumpsys, "mIsInteractive: false") ||
+		strings.Contains(dumpsys, "INTERACTIVE_STATE_SLEEP")
+	up := strings.Contains(dumpsys, "mIsInteractive: true") ||
+		strings.Contains(dumpsys, "INTERACTIVE_STATE_AWAKE")
+	return down && !up
+}
+
+// wakefulness returns the device-wide wakefulness, as the word the phone prints.
+//
+// ⛔ IT INSISTS ON A WORD, because the same key appears NUMBERED further down —
+// `mWakefulness=0` and `mWakefulness=1`, once per power group, inside a
+// statistics block. Those are per-screen again, and a number is not a state name
+// this can read. Taking the first match blindly would work today and break the
+// day the blocks are reordered.
+func wakefulness(dumpsys string) (string, bool) {
+	const key = "mWakefulness="
+	for rest := dumpsys; ; {
+		i := strings.Index(rest, key)
+		if i < 0 {
+			return "", false
+		}
+		rest = rest[i+len(key):]
+		value := rest
+		if j := strings.IndexAny(value, " \t\r\n"); j >= 0 {
+			value = value[:j]
+		}
+		if value != "" && !strings.ContainsAny(value, "0123456789") {
+			return value, true
+		}
+	}
 }
 
 // soleDevice returns the only attached device, refusing to choose.
