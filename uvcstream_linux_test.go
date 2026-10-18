@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -43,6 +44,12 @@ func isoEndpoint(per int) USBEndpoint {
 // at the same height. Here it is handed the *urbSlot and writes into an
 // ordinary Go slice.
 type fakeStream struct {
+	// ⛔⛔ IT IS LOCKED BECAUSE THE READER IS A GOROUTINE NOW. The seams used to
+	// be called only from the caller's own goroutine; since the stream reaps on
+	// its own, the fake is touched concurrently by the reader and by whatever the
+	// test does next, and `-race` is the gate that says so. A fake with a data
+	// race in it reports the suite's bug as the subject's.
+	mu     sync.Mutex
 	t      *testing.T
 	packet int
 
@@ -71,6 +78,8 @@ func (f *fakeStream) install() {
 	f.t.Cleanup(func() { submitURB, reapURB, discardURB = oldSubmit, oldReap, oldDiscard })
 
 	submitURB = func(_ int, slot *urbSlot) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
 		f.submits++
 		if f.submitErrAfter != 0 && f.submits >= f.submitErrAfter {
 			return syscall.ENODEV
@@ -79,6 +88,8 @@ func (f *fakeStream) install() {
 		return nil
 	}
 	reapURB = func(int) (uintptr, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
 		f.reaps++
 		if f.reapErr != nil {
 			return 0, f.reapErr
@@ -99,6 +110,8 @@ func (f *fakeStream) install() {
 		return slot.addr, nil
 	}
 	discardURB = func(_ int, slot *urbSlot) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
 		f.discards++
 		for i, q := range f.queue {
 			if q == slot {
@@ -110,7 +123,30 @@ func (f *fakeStream) install() {
 	}
 }
 
+// counts returns the three syscall tallies.
+//
+// ⛔⛔ A TEST MAY ONLY READ THEM THROUGH THIS, BECAUSE THE READER IS A GOROUTINE.
+// Reading f.submits straight out of a test body was a data race the moment the
+// decode moved off the reaping path, and `-race` caught two of them in one run.
+// A fake with a race in it reports the suite's defect as the subject's, which
+// costs a cycle before anyone looks at the fake.
+func (f *fakeStream) counts() (submits, reaps, discards int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.submits, f.reaps, f.discards
+}
+
+// failTheNextSubmit arms the submit that follows the ones already made, whatever
+// number the reader has reached by the time this is called.
+func (f *fakeStream) failTheNextSubmit() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.submitErrAfter = f.submits + 1
+}
+
 // fill writes the next request's worth of packets into one slot.
+//
+// It is called from reapURB with the lock already held.
 func (f *fakeStream) fill(slot *urbSlot) {
 	for i := 0; i < StreamPacketsPerURB; i++ {
 		d := (*usbdevfsISOPacketDesc)(unsafe.Pointer(&slot.raw[urbSize+isoPacketSize*i]))
@@ -121,8 +157,15 @@ func (f *fakeStream) fill(slot *urbSlot) {
 		pkt := f.packets[0]
 		f.packets = f.packets[1:]
 		if len(pkt) > f.packet {
-			f.t.Fatalf("this fake was asked to send a %d-byte packet on a %d-byte endpoint",
+			// ⛔ Errorf AND NOT Fatalf: this runs on the READER's goroutine, and
+			// Fatalf there ends that goroutine instead of the test — testing
+			// forbids it, and the suite would hang rather than fail. The packet
+			// is dropped, which is also what an endpoint too small to carry it
+			// would do.
+			f.t.Errorf("this fake was asked to send a %d-byte packet on a %d-byte endpoint",
 				len(pkt), f.packet)
+			d.ActualLength = 0
+			continue
 		}
 		copy(slot.buf[i*f.packet:], pkt)
 		d.ActualLength = uint32(len(pkt))
@@ -219,9 +262,9 @@ func TestAStreamFillsTheRingBeforeItReadsAnything(t *testing.T) {
 		t.Fatalf("Stream: %v", err)
 	}
 	defer s.Close()
-	if f.submits != StreamURBs {
+	if submits, _, _ := f.counts(); submits != StreamURBs {
 		t.Errorf("Stream submitted %d requests, want %d before reading anything",
-			f.submits, StreamURBs)
+			submits, StreamURBs)
 	}
 	if len(s.ring) != StreamURBs {
 		t.Errorf("the ring holds %d slots, want %d", len(s.ring), StreamURBs)
@@ -279,8 +322,8 @@ func TestAStreamDeliversAFrameAndKeepsTheRingFull(t *testing.T) {
 	}
 	// Every slot the stream emptied was submitted again: the ring cannot run
 	// down, or the camera's packets start going nowhere a request at a time.
-	if f.submits <= StreamURBs {
-		t.Errorf("%d submits in all; a reaped request was not resubmitted", f.submits)
+	if submits, _, _ := f.counts(); submits <= StreamURBs {
+		t.Errorf("%d submits in all; a reaped request was not resubmitted", submits)
 	}
 	if got := s.Negotiation(); got.Format != 1 || got.Frame != 2 {
 		t.Errorf("Negotiation = %+v, want the one Stream was given", got)
@@ -356,6 +399,37 @@ func TestACallerSlowerThanTheCameraLosesTheOldestFrames(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	// ⛔⛔ THE READER HAS TO FINISH SHEDDING BEFORE THE CALLER ASKS, OR THIS
+	// TEST MEASURES A COIN TOSS. The reaping runs on its own goroutine since
+	// the decode moved off that path, so a Frame issued straight after Stream
+	// races it: the caller can take 0x10 out of the handover while the reader
+	// is still pushing 0x14, and then "the oldest was shed" is not yet true of
+	// anything. Being slower than the camera is the premise of the test, so it
+	// is waited for rather than hoped for — every frame of the request
+	// accounted for, the handover full, the rest counted late.
+	//
+	// ⛔ AND IT IS StreamPacketsPerURB-1 FRAMES, NOT StreamPacketsPerURB. A
+	// frame closes on the NEXT boundary — the identifier toggling, or an
+	// end-of-frame flag — so the last packet of the request leaves a frame open
+	// with nothing to close it. Eight packets, each a whole 320x1 frame, hand
+	// over seven. That is what the "+1" in the old accounting assertion was
+	// quietly encoding, and asking for eight here timed out four runs out of
+	// four until the stats were printed.
+	const complete = StreamPacketsPerURB - 1
+	const shed = complete - MaxPendingFrames
+	settled := func() bool {
+		st := s.Stats()
+		return st.Frames == complete && st.Late == shed &&
+			len(s.frames) == MaxPendingFrames
+	}
+	for deadline := time.Now().Add(2 * time.Second); !settled(); {
+		if time.Now().After(deadline) {
+			t.Fatalf("the reader never settled: %s, %d waiting; want %d frames, %d "+
+				"late, %d waiting", s.Stats(), len(s.frames), complete,
+				shed, MaxPendingFrames)
+		}
+		time.Sleep(time.Millisecond)
+	}
 	img, err := s.Frame(streamCtx(t))
 	if err != nil {
 		t.Fatalf("Frame: %v", err)
@@ -366,18 +440,26 @@ func TestACallerSlowerThanTheCameraLosesTheOldestFrames(t *testing.T) {
 		t.Fatalf("%d frames completed in one request against a ceiling of %d and none "+
 			"was shed; the queue has no ceiling (%s)", st.Frames, MaxPendingFrames, st)
 	}
-	// Every frame the assembler finished is either delivered, still queued, or
-	// counted late. ⛔ A COUNTER THAT DOES NOT ADD UP IS THE DEFECT THIS WHOLE
-	// FILE EXISTS FOR.
-	if st.Late+len(s.pending)+1 != st.Frames {
-		t.Errorf("%d frames assembled, 1 delivered, %d still queued, %d late; they must "+
-			"add up (%s)", st.Frames, len(s.pending), st.Late, st)
+	// Every frame the assembler finished is either delivered, waiting in the
+	// handover, or counted late. ⛔ A COUNTER THAT DOES NOT ADD UP IS THE DEFECT
+	// THIS WHOLE FILE EXISTS FOR — and the queue it counts moved from a slice to
+	// a channel when the reader became a goroutine, which is why this reads
+	// len(s.frames) now.
+	if st.Late+len(s.frames)+1 != st.Frames {
+		t.Errorf("%d frames assembled, 1 delivered, %d waiting, %d late; they must "+
+			"add up (%s)", st.Frames, len(s.frames), st.Late, st)
 	}
-	// And the frame handed over is NOT the oldest: the oldest is what was shed,
-	// because head tracking wants the freshest.
-	if got := img.Pix[0]; got == 0x10 {
-		t.Errorf("the frame delivered is the oldest one (%#02x); the oldest is what gets "+
-			"shed, or a tracker runs on stale pixels", got)
+	// ⛔⛔ AND THE FRAME HANDED OVER IS THE OLDEST SURVIVOR, NOT THE OLDEST
+	// FRAME, which is the assertion that caught the channel inverting the
+	// policy. A channel is a queue: the first version of the reader dropped the
+	// frame it was holding when the channel was full, which left the caller
+	// reading the four stalest pictures — the opposite of what head tracking
+	// wants. Room is made at the FRONT, so 0x10 through 0x13 are gone and the
+	// handover still runs in order from there.
+	if got, want := img.Pix[0], byte(0x10+shed); got != want {
+		t.Errorf("the frame delivered is %#02x, want %#02x: the %d oldest get shed and "+
+			"the rest keep their order, or a tracker runs on stale pixels",
+			got, want, shed)
 	}
 }
 
@@ -667,9 +749,9 @@ func TestAnMJPEGStreamDeliversPicturesAndTimesItsOwnDecode(t *testing.T) {
 	if st.Frames < 1 {
 		t.Fatalf("no frame was assembled (%s)", st)
 	}
-	if st.Late+len(s.pending)+1 != st.Frames {
-		t.Errorf("%d frames assembled, 1 delivered, %d queued, %d late; they must add "+
-			"up (%s)", st.Frames, len(s.pending), st.Late, st)
+	if st.Late+len(s.frames)+1 != st.Frames {
+		t.Errorf("%d frames assembled, 1 delivered, %d waiting, %d late; they must add "+
+			"up (%s)", st.Frames, len(s.frames), st.Late, st)
 	}
 	if st.Decoding <= 0 {
 		t.Errorf("Stats reports no decoding time; that number is what the choice "+
@@ -770,8 +852,8 @@ func TestAStreamWaitsRatherThanSpinning(t *testing.T) {
 	// thirty reaps, and a spinning loop would be in the thousands. A tight
 	// bound here would fail under load, and this fleet has a rule about
 	// measuring under load.
-	if f.reaps > 500 {
-		t.Errorf("%d reap attempts in 30ms: the wait is a busy loop", f.reaps)
+	if _, reaps, _ := f.counts(); reaps > 500 {
+		t.Errorf("%d reap attempts in 30ms: the wait is a busy loop", reaps)
 	}
 }
 
@@ -788,8 +870,8 @@ func TestAStreamStopsWhenItIsClosed(t *testing.T) {
 	// ⛔ EVERY OUTSTANDING REQUEST IS DISCARDED. One left in flight has the
 	// kernel writing into this process's memory on the camera's schedule, and
 	// the Go heap is entitled to move on without it.
-	if f.discards != StreamURBs {
-		t.Errorf("Close discarded %d of %d outstanding requests", f.discards, StreamURBs)
+	if _, _, discards := f.counts(); discards != StreamURBs {
+		t.Errorf("Close discarded %d of %d outstanding requests", discards, StreamURBs)
 	}
 	if _, err := s.Frame(streamCtx(t)); !errors.Is(err, ErrClosed) {
 		t.Errorf("Frame after Close = %v, want ErrClosed", err)
@@ -797,8 +879,8 @@ func TestAStreamStopsWhenItIsClosed(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Errorf("the second Close = %v, want it idempotent", err)
 	}
-	if f.discards != StreamURBs {
-		t.Errorf("the second Close discarded again (%d in all)", f.discards)
+	if _, _, discards := f.counts(); discards != StreamURBs {
+		t.Errorf("the second Close discarded again (%d in all)", discards)
 	}
 	// A context already cancelled is reported before anything else is touched.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -819,7 +901,7 @@ func TestAStreamReportsWhatTheKernelRefuses(t *testing.T) {
 		// ⛔ AND IT CLEANS UP WHAT IT DID QUEUE. A failed Stream that left one
 		// request outstanding would leave the kernel writing into memory this
 		// process has forgotten.
-		if f.discards == 0 {
+		if _, _, discards := f.counts(); discards == 0 {
 			t.Error("Stream failed without discarding the request it had already queued")
 		}
 	})
@@ -849,7 +931,7 @@ func TestAStreamReportsWhatTheKernelRefuses(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer s.Close()
-		f.submitErrAfter = f.submits + 1
+		f.failTheNextSubmit()
 		if _, err := s.Frame(streamCtx(t)); !errors.Is(err, syscall.ENODEV) {
 			t.Fatalf("Frame = %v, want the kernel's ENODEV from the resubmit", err)
 		}
