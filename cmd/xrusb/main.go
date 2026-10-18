@@ -59,6 +59,15 @@ func run(ctx context.Context, args []string) int {
 	// full rate, and that is a prediction rather than a preference.
 	width := fs.Int("width", 0, "force a frame width (0 picks the fastest above "+
 		"MinTrackingWidth, which is what a real caller gets)")
+	// ⭐ MJPEG IS NOT THE DEFAULT, AND THAT IS DELIBERATE. The camera's table
+	// says MJPEG does 30 fps at every size against YUY2's 25 at 640x480 and
+	// below, and the byte budget says why — but what MJPEG costs is a DECODE,
+	// and the processor that has to fit it inside a frame interval is this
+	// phone's rather than a workstation's. Until that is measured here, changing
+	// the default would be acting on a prediction. The stream reports its own
+	// decoding time, so one run settles it.
+	format := fs.String("format", "", "force a format: yuy2 or mjpeg (empty asks "+
+		"PickFormat, which prefers the one needing no decoder)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -182,16 +191,32 @@ func run(ctx context.Context, args []string) int {
 		say("STEP 6 pick                  FAILED: %v", perr)
 		return 1
 	}
-	if *width > 0 {
-		w, z, ok := frameAtWidth(formats, *width)
+	if *width > 0 || *format != "" {
+		kind := want.Format
+		switch strings.ToLower(*format) {
+		case "":
+		case "yuy2":
+			kind = android.FormatYUY2
+		case "mjpeg":
+			kind = android.FormatMJPEG
+		default:
+			say("STEP 6 pick                  FAILED: %q is not a format this probe "+
+				"knows; it takes yuy2 or mjpeg", *format)
+			return 1
+		}
+		at := *width
+		if at == 0 {
+			at = size.Width
+		}
+		w, z, ok := frameAt(formats, kind, at)
 		if !ok {
-			say("STEP 6 pick                  FAILED: no format offers a %d-pixel-wide "+
-				"frame; the table above is what the camera has", *width)
+			say("STEP 6 pick                  FAILED: %s offers no %d-pixel-wide frame; "+
+				"the table above is what the camera has", kind, at)
 			return 1
 		}
 		want, size = w, z
-		say("STEP 6 pick                  %s %s (forced by -width %d)",
-			want.Format, size, *width)
+		say("STEP 6 pick                  %s %s (forced: -format %s -width %d)",
+			want.Format, size, kind, at)
 	} else {
 		say("STEP 6 pick                  %s %s", want.Format, size)
 	}
@@ -471,34 +496,31 @@ func reportV4L2(say func(string, ...any)) {
 // is the one a real stream would want — and because it is the one most likely to
 // be refused for bandwidth, which is a different refusal from being refused for
 // permission and worth telling apart.
-// frameAtWidth finds the fastest frame of exactly the given width, preferring
-// the formats this package can read without a decoder.
+// frameAt finds the fastest frame of exactly the given format and width.
 //
 // ⚠ IT LIVES HERE AND NOT IN THE LIBRARY. A real caller wants the policy
-// [android.PickFormat] implements; this is an instrument for one sweep, and a
+// [android.PickFormat] implements; this is an instrument for a sweep, and a
 // library that grew a knob for every experiment would be a library of knobs.
-func frameAtWidth(fs []android.UVCFormatDesc, w int) (android.UVCFormatDesc,
-	android.UVCFrameSize, bool) {
-	for _, prefer := range []android.UVCFormat{android.FormatYUY2, android.FormatMJPEG} {
-		for _, f := range fs {
-			if f.Format != prefer {
+func frameAt(fs []android.UVCFormatDesc, kind android.UVCFormat, w int) (
+	android.UVCFormatDesc, android.UVCFrameSize, bool) {
+	for _, f := range fs {
+		if f.Format != kind {
+			continue
+		}
+		var best android.UVCFrameSize
+		found := false
+		for _, z := range f.Sizes {
+			if z.Width != w {
 				continue
 			}
-			var best android.UVCFrameSize
-			found := false
-			for _, z := range f.Sizes {
-				if z.Width != w {
-					continue
-				}
-				// Fastest means the SHORTEST interval, which is the largest
-				// frame rate: the interval is in 100ns units.
-				if !found || (z.Interval > 0 && z.Interval < best.Interval) {
-					best, found = z, true
-				}
+			// Fastest means the SHORTEST interval, which is the largest frame
+			// rate: the interval is in 100ns units.
+			if !found || (z.Interval > 0 && z.Interval < best.Interval) {
+				best, found = z, true
 			}
-			if found {
-				return f, best, true
-			}
+		}
+		if found {
+			return f, best, true
 		}
 	}
 	return android.UVCFormatDesc{}, android.UVCFrameSize{}, false

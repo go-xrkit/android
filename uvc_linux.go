@@ -86,8 +86,14 @@ func (h *USBHandle) Negotiate(iface int, f UVCFormatDesc, z UVCFrameSize) (UVCNe
 		return UVCNegotiation{}, fmt.Errorf("committing format %d frame %d: %w",
 			format, frame, err)
 	}
+	// ⚠ Kind COMES FROM THE DESCRIPTOR WE ASKED WITH, not from the index that
+	// came back. A camera may settle on a different format index, and if it does
+	// this kind describes what was ASKED — which is what
+	// [UVCNegotiation.Changed] exists for a caller to notice. Deriving it from
+	// the returned index would need a second descriptor walk at the one moment
+	// the device has already told us everything.
 	return UVCNegotiation{
 		Format: format, Frame: frame, Interval: interval,
-		MaxPayload: payload, Asked: z,
+		MaxPayload: payload, Asked: z, Kind: f.Format,
 	}, nil
 }

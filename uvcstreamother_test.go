@@ -19,13 +19,34 @@ import (
 func TestStreamOffAndroid(t *testing.T) {
 	t.Parallel()
 	var h USBHandle
-	s, err := h.Stream(UVCNegotiation{}, USBEndpoint{Address: 0x81, Attributes: 1,
-		MaxPacketSize: 0x1400}, 640, 480)
-	if !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("Stream = %v, want ErrUnsupported", err)
+	ep := USBEndpoint{Address: 0x81, Attributes: 1, MaxPacketSize: 0x1400}
+	for _, kind := range []UVCFormat{FormatYUY2, FormatMJPEG} {
+		s, err := h.Stream(UVCNegotiation{Kind: kind}, ep, 640, 480)
+		if !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("Stream for %s = %v, want ErrUnsupported", kind, err)
+		}
+		if s != nil {
+			t.Fatalf("Stream for %s returned a stream alongside its refusal", kind)
+		}
 	}
-	if s != nil {
-		t.Fatal("Stream returned a stream alongside its refusal")
+}
+
+// TestAStreamWithNoFormatNAMEDIsRefused.
+//
+// ⛔⛔ THE ZERO VALUE USED TO MEAN YUY2 BY ACCIDENT, and that stopped being safe
+// the moment a compressed format existed: a whole YUY2 frame is a LENGTH and a
+// whole MJPEG frame is a pair of MARKERS, and assembling either way round
+// produces nothing. FormatUnknown is also what an unrecognised descriptor
+// becomes, so the same refusal covers "nobody said" and "we could not tell".
+func TestAStreamWithNoFormatNamedIsRefused(t *testing.T) {
+	t.Parallel()
+	var h USBHandle
+	ep := USBEndpoint{Address: 0x81, Attributes: 1, MaxPacketSize: 0x1400}
+	_, err := h.Stream(UVCNegotiation{}, ep, 640, 480)
+	if !errors.Is(err, ErrInvalidOption) {
+		t.Fatalf("Stream with no Kind = %v, want ErrInvalidOption — not "+
+			"ErrUnsupported, which would hide the real mistake behind the "+
+			"platform", err)
 	}
 }
 
@@ -37,7 +58,11 @@ func TestStreamOffAndroidStillChecksTheFrameSize(t *testing.T) {
 	t.Parallel()
 	var h USBHandle
 	ep := USBEndpoint{Address: 0x81, Attributes: 1, MaxPacketSize: 0x1400}
-	if _, err := h.Stream(UVCNegotiation{}, ep, 16, 16); !errors.Is(err, ErrInvalidOption) {
+	// ⛔ THE FORMAT IS NAMED HERE ON PURPOSE. Without it this would be refused
+	// for the MISSING FORMAT and pass while saying nothing about the size —
+	// which is the shape of a test that agrees with the code for the wrong
+	// reason.
+	if _, err := h.Stream(UVCNegotiation{Kind: FormatYUY2}, ep, 16, 16); !errors.Is(err, ErrInvalidOption) {
 		t.Fatalf("Stream on a 16x16 frame = %v, want ErrInvalidOption — not "+
 			"ErrUnsupported, which would hide the real mistake", err)
 	}

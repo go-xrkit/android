@@ -908,11 +908,29 @@ across is already 160 bins.
 `Fastest` now maximises the frame rate at or above `MinTrackingWidth`, and the
 pick is **25 fps instead of 5**.
 
-⚠ **MJPEG is faster on this camera and is not chosen**, which is a statement
-about the code rather than the hardware: there is no JPEG decode in the frame
-path yet, and YUY2 needs none — every other byte *is* the luminance, which is
-all `headflow.Profile` reads. The day that decode exists, MJPEG's 30 fps at
-every size is the better answer.
+⚠ **MJPEG is faster on this camera and is still not the default** — but the
+reason changed. It used to be that there was no JPEG decode in the frame path.
+There is now: `image/jpeg` is in the standard library and is pure Go, so it
+needed no cgo and no exception to this module's `CGO_ENABLED=0` — the decoder was
+in the toolchain all along.
+
+What MJPEG costs is a **decode**, and whether that fits inside a frame interval
+depends on the processor that has to fit it. Measured on this workstation:
+
+| size | MJPEG decode | share of a 30 fps interval |
+|---|---|---|
+| 320×240 | 1.04–1.09 ms | **3 %** |
+| 640×480 | 5.0–6.0 ms | **15–18 %** |
+| 1920×1080 | 22.8–27.9 ms | **69–84 %** |
+
+(YUY2 is 0.25–0.43 ms at 640×480 for comparison, from the same benchmark on the
+same machine, under load average 15.)
+
+So MJPEG is affordable up to 640×480 and **1080p at 30 fps is not** — it would
+need most of a core. ⛔ And those figures are a workstation's: an **optimistic
+bound** for the phone, not a measurement of it. `UVCStreamStats.Decoding` reports
+the real thing from the device, and `cmd/xrusb -format mjpeg` is one run. The
+default changes when that run exists, and not on the strength of a prediction.
 
 ### What is written, and what is not
 
@@ -1086,6 +1104,17 @@ make eighty of them. `cmd/xrusb -width 320` is one run. The descriptor table say
 the same thing from the other side: the camera advertises **MJPEG at 30 fps for
 every size** and YUY2 at 25 only at 640×480 and below, which is exactly what a
 fixed byte budget looks like once the frames are compressed.
+
+⭐ **And MJPEG is now in the frame path**, which is the other half of that
+prediction — `cmd/xrusb -format mjpeg` is the second run. A compressed frame is
+whole by its **markers** and an uncompressed one by its **length**, so the
+assembler had to learn which it is holding: `NewFrameAssemblerFor` takes the
+format, and `UVCNegotiation.Kind` is where it comes from, because a negotiation
+result should say what was agreed rather than leave a stream to guess.
+
+⛔ Both runs are still **unmeasured on the device**, and neither prediction is
+reported here as a result. The byte budget earns the prediction; only the phone
+settles it.
 
 ⭐ **The ring depth is not the cause, and a control says so rather than a story.**
 Deepening it looked obviously right: a 640×480 YUY2 frame at 2400 bytes an

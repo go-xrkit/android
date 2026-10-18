@@ -17,10 +17,15 @@ import (
 type UVCStream struct{ neg UVCNegotiation }
 
 // Stream starts reading frames from a negotiated camera. Off Android there is
-// no device, so it reports [ErrUnsupported] — after the portable frame-size
-// check, which behaves identically everywhere.
+// no device, so it reports [ErrUnsupported] — after the portable format and
+// frame-size checks, which behave identically everywhere.
 func (h *USBHandle) Stream(neg UVCNegotiation, ep USBEndpoint, w, h2 int) (*UVCStream, error) {
-	if _, err := NewFrameAssembler(w, h2); err != nil {
+	// ⛔ THE SAME CONSTRUCTOR AS THE REAL ONE, with the same arguments. A stub
+	// that checked a NARROWER thing would let a caller get further off the
+	// device than on it, and the point of refusing here is that a size or a
+	// format this package cannot handle is found on a workstation rather than
+	// on a phone somebody has to be holding.
+	if _, err := NewFrameAssemblerFor(neg.Kind, w, h2); err != nil {
 		return nil, err
 	}
 	return nil, ErrUnsupported
