@@ -1700,10 +1700,23 @@ wakefulness is in one and the keyguard in the other, and it names which
 condition is in the way:
 
 ```
-xrrun: … is not usable: it is asleep and it is locked.
+… is not usable: it is locked.
 ⛔ WAKE AND UNLOCK THE PHONE, AND LEAVE IT ON.
-  adb -s … shell svc power stayon usb   # keeps it awake while plugged in
+  adb -s … shell svc power stayon true   # EVERY power source: this rig reports AC, not USB
+  adb -s … shell settings get system screen_off_timeout   # 30000 here
+
+==> waiting up to 3m0s for the phone, asking every second
+==> the phone is awake and unlocked; carrying on
 ```
+
+⛔⛔ **It WAITS for the unlock rather than refusing it, and `-hands` is how
+long.** Unlocking is a fingerprint or a code: nothing here can do it and nothing
+should. A guard that refuses the instant it is called makes a person time an
+unlock to a launch, and every mistimed attempt costs a build and an install —
+**five round trips for one unlock**, measured on 2026-10-18. The reason is
+printed once, then the phone is asked again every second. `-hands` is separate
+from `-patience` because one waits for a machine and the other for somebody to
+come back to their desk.
 
 ⚠ **The strings it looks for were read off the phone, not taken from the crash
 transcript.** The first version grepped `window policy` for `mWakefulness=Dozing`
@@ -1713,6 +1726,41 @@ in neither section; the keyguard says `showing=true` and `inputRestricted=true`
 in its own delegate block. And `screenState` is **`SCREEN_STATE_ON` while the
 phone sleeps**, because of the always-on display, so a check on the screen is
 the wrong check. One real transcript is pinned as the fixture.
+
+⛔⛔⛔ **And those strings were still wrong, because this phone FOLDS.** A
+foldable has two power groups, one per screen, and `dumpsys power` prints
+`mIsInteractive` for each — so on an **awake and unlocked** phone one of them
+says `false`, and a `strings.Contains` for it declared the *phone* asleep. The
+guard refused three times in a row and sent a person to wake a device that was
+already awake, which is the exact round trip it exists to prevent:
+
+```
+mWakefulness=Awake                         ← the phone
+  Wakefulness Session Power Group powerGroupId: 0
+    mIsInteractive: false                  ← one screen, dark
+  Wakefulness Session Power Group powerGroupId: 1
+    mIsInteractive: true                   ← the other, in use
+```
+
+The device-wide `mWakefulness=<word>` decides now, and the per-screen signs only
+when that line is missing — and then only if nothing contradicts them, because
+one screen awake is all the platform needs. It insists on a **word** because the
+same key reappears **numbered** once per power group in a statistics block.
+
+⭐ **The signs HAD been measured on this phone — wholly asleep, where both
+screens agree.** A measurement taken in a state where two cases coincide cannot
+distinguish them. The fix therefore ships with a control: a phone that really is
+`Dozing` while one screen still reports interactive must *still* be refused, or
+the guard has merely stopped looking.
+
+⚠ And the command it suggested could not work here. `svc power stayon usb` sets
+one bit of `stay_on_while_plugged_in`, and this rig reports `AC powered: true,
+USB powered: false` — the phone is charged through the same hub the glasses hang
+off. The setting read back as **applied** while the screen kept going dark on a
+30-second timeout. **A suggestion that cannot work on the rig it is printed for
+is worse than none: it reads as a fix that was tried.** The message is built by
+its own function now, so a test can read what a person is told; being reachable
+only with a phone attached is how `usb` survived four releases.
 
 ⚠ **A section it cannot read is not a refusal**: `dumpsys` gets renamed between
 releases, and a tool that refused to run because it could not find a field would
