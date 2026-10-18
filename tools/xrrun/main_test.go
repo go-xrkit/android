@@ -108,7 +108,7 @@ func TestEachReasonIsGivenOnce(t *testing.T) {
 // The transcript table is how -app alone is enough, and a name missing from it
 // reads as "the probe wrote nothing" — which is also what a crash looks like.
 func TestEveryProbeInThisRepositoryHasATranscript(t *testing.T) {
-	for _, probe := range []string{"xrusb", "xrcam", "xrscreen", "xrglasses"} {
+	for _, probe := range []string{"xrusb", "xrhead", "xrcam", "xrscreen", "xrglasses"} {
 		if _, ok := transcripts[probe]; !ok {
 			t.Errorf("%s writes no transcript this tool knows", probe)
 		}

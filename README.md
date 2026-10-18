@@ -1144,6 +1144,46 @@ directory outside every work tree that `go-appdirs/outdir` chooses, and were
 deleted from the phone and the workstation once the measurement existed. That is
 the whole of the hygiene, and `xrrun` says so when it brings them back.
 
+### ⭐⭐⭐ And live, on the phone: 0.9 % of a frame interval
+
+`cmd/xrhead` streams and tracks in **one process on the device**, which the
+replay could not speak to: there the tracker ran on a workstation, against files,
+with no clock.
+
+```
+TRACKED 91 frame(s) in 8.001s — 11.4 fps
+    86 used, 3 reference(s), 2 refused for want of confidence
+    the tracker itself: 72ms in all, 790µs a frame
+    the decode: 4.04ms a frame
+    consecutive frames: 90 differed, 0 identical
+ANSWER 748.5° of travel, -26.3° to 113.2°, over 86 matched frame(s)
+```
+
+**790 µs of an 88 ms interval is 0.9 %**, and the decode is another 4.6 %. So the
+camera's ~10 frames a second is the ceiling and the arithmetic is free — which
+was a prediction until this ran, and predictions have been wrong twice in this
+file.
+
+⛔⛔ **The row that says `90 differed, 0 identical` is there because two earlier
+runs read "the head did not move" and I could not tell whether that was true.**
+0° of travel with 89 frames matched at good confidence is consistent with a still
+head *and* with wiring that is blind — and the stream hands back a **reused**
+image, which is exactly the shape of a bug that would produce a confident zero.
+Comparing one row of the middle band between frames tells them apart, costs a few
+hundred byte comparisons against an 88 ms interval, and turned two unreadable
+runs into a measured negative: the scene really was static. An instrument that
+cannot fail is not an instrument.
+
+⛔⛔ **And the dependency this needed cost ONE LINE, against an argument this file
+made four times.** "`go-xrkit/xrkit` pulls in HCL and eight indirect modules, and
+a USB layer has no business acquiring a configuration language" — measured,
+importing `headflow` adds **one** line to `go.mod` and **two** to `go.sum`,
+because Go prunes a dependency's requirements for packages you do not import and
+`headflow` imports only the standard library. The file interface that argument
+justified is still worth having — offline replay, and pictures a person can look
+at — but it was justified by a reason that was not true, and asserting a cost
+four times without measuring it is the thing to notice.
+
 #### The per-boundary census, and the diagnosis it first produced
 
 Before the fix below, the same run read:
@@ -1780,8 +1820,12 @@ Deliberate, and stated rather than hidden:
   `ACCESS_LOCAL_NETWORK` — mandatory from Android 17 for anything that accepts
   an incoming connection. The commands sidestep it by writing transcripts, which
   is why they work at all; making one reachable is unwritten;
-- **head tracking on Android WORKS, and the rate is the camera's.** A worn
-  left-right sweep comes back as **197.9° of travel** — out to −52°, back through
+- **head tracking on Android WORKS, ON THE PHONE, LIVE.** `cmd/xrhead` streams
+  and tracks in one process: **748.5° of travel** over 86 matched frames in 8
+  seconds, and the tracker itself costs **790 µs of an 88 ms frame interval —
+  0.9 %**. A worn
+  left-right sweep replayed offline comes back as **197.9° of travel** — out to
+  −52°, back through
   zero, out to +80° — through usbfs on an unrooted phone, at **~10 frames a
   second**. That rate is flat across a fourfold change in pixel count, so it is a
   ceiling on the camera's own frame production rather than anything here: MJPEG
