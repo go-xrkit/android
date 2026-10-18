@@ -5,9 +5,12 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ⛔⛔ THIS COST THREE MEASUREMENT CYCLES, EVERY ONE OF THEM AT THE END. Behind
@@ -33,6 +36,34 @@ const asleepAndLocked = `  mWakefulness=Dozing
       inputRestricted=true
       occluded=false
       screenState=SCREEN_STATE_ON
+      interactiveState=INTERACTIVE_STATE_SLEEP
+`
+
+// ⛔⛔⛔ AND THIS ONE IS THE SAME PHONE, AWAKE AND UNLOCKED — the fixture that
+// proves the guard was reading a SCREEN where it meant the PHONE. Measured on
+// the Pixel 11 Pro Fold, 2026-10-18 21:05 CEST, while a person was looking at
+// it: `mIsInteractive: false` for the dark screen, `: true` for the one in use,
+// and `interactiveState=INTERACTIVE_STATE_SLEEP` for a display of its own. The
+// old guard found the first of those and refused the run three times, telling a
+// person to wake a phone that was already awake.
+//
+// The numbered `mWakefulness=` lines are kept in the fixture deliberately: they
+// are per-power-group statistics, and a reader that took the first match would
+// get `0` and have to guess what that means.
+const awakeAndUnlockedOnAFoldable = `  mWakefulness=Awake
+  mWakefulnessChanging=false
+  mHalInteractiveModeEnabled=true
+  Wakefulness Session Power Group powerGroupId: 0
+    current wakefulness: 0
+    mIsInteractive: false
+  Wakefulness Session Power Group powerGroupId: 1
+    current wakefulness: 1
+    mIsInteractive: true
+  mWakefulness=0
+  mWakefulness=1
+    KeyguardServiceDelegate
+      showing=false
+      inputRestricted=false
       interactiveState=INTERACTIVE_STATE_SLEEP
 `
 
@@ -77,6 +108,39 @@ func TestAPhoneThatCannotRunAProbeSaysSo(t *testing.T) {
 			want: []string{"it is asleep"},
 		},
 		{
+			// ⛔⛔⛔ THE DEFECT THIS FILE EXISTS FOR, SECOND EDITION: one screen of
+			// a foldable is dark while the phone is plainly awake and unlocked,
+			// and the guard refused it three times running.
+			name: "awake and unlocked, with one screen of the fold dark",
+			in:   awakeAndUnlockedOnAFoldable,
+			want: nil,
+		},
+		{
+			// A phone genuinely asleep still says so, even though the SAME
+			// per-screen disagreement is present — the device-wide line decides,
+			// and this is the control that says the fix did not simply stop
+			// looking.
+			name: "asleep, with one screen still reporting interactive",
+			in: "  mWakefulness=Dozing\n    mIsInteractive: false\n" +
+				"    mIsInteractive: true\n",
+			want: []string{"it is asleep"},
+		},
+		{
+			// ⚠ The fallback, for the day the section is renamed: per-screen
+			// signs are all there is, and they agree.
+			name: "no device-wide line, and every screen is down",
+			in:   "  something renamed\n    mIsInteractive: false\n",
+			want: []string{"it is asleep"},
+		},
+		{
+			// ⚠ And the same fallback when they disagree: one screen up is
+			// enough for the platform, so this is not a refusal.
+			name: "no device-wide line, and one screen is up",
+			in: "  something renamed\n    mIsInteractive: false\n" +
+				"      interactiveState=INTERACTIVE_STATE_AWAKE\n",
+			want: nil,
+		},
+		{
 			// ⚠ AN UNREADABLE SECTION IS NOT A REFUSAL. dumpsys gets renamed
 			// between releases, and a tool that refused to run because it could
 			// not find a field would be worse than the crash it avoids — the
@@ -92,6 +156,99 @@ func TestAPhoneThatCannotRunAProbeSaysSo(t *testing.T) {
 				t.Fatalf("lockedBecause = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// ⛔⛔ THE SUGGESTED COMMAND MUST NAME EVERY POWER SOURCE. It said `stayon usb`
+// for four releases, which sets one bit of stay_on_while_plugged_in — and the
+// rig this tool exists for reports `AC powered: true, USB powered: false`,
+// because the phone is charged through the same hub the glasses hang off. The
+// setting read back as applied while the screen kept going dark on a 30-second
+// timeout, which is the worst shape a suggestion can have: it looks like a fix
+// that was tried. `true` sets all of them.
+func TestTheRefusalSuggestsSomethingThatWorksOnThisRig(t *testing.T) {
+	err := refusal("a-device", []string{"it is asleep"})
+	if !strings.Contains(err.Error(), "svc power stayon true") {
+		t.Errorf("the refusal does not suggest stayon true:\n%v", err)
+	}
+	if strings.Contains(err.Error(), "stayon usb") {
+		t.Errorf("the refusal still suggests stayon usb, which does nothing when the "+
+			"supply is classified as AC:\n%v", err)
+	}
+}
+
+// ⛔⛔ THE GUARD WAITS FOR THE GESTURE INSTEAD OF REFUSING IT. Unlocking is a
+// fingerprint or a code: no tool can do it and none should, so a guard that
+// refuses the instant it is called makes a person time an unlock to a launch.
+// That cost five round trips for one unlock on 2026-10-18.
+//
+// stateOf is replaced here because a test with a phone would need the gesture
+// it exists to wait for.
+func TestTheGuardWaitsForTheHandThatHasToUnlockIt(t *testing.T) {
+	restore := stateOf
+	t.Cleanup(func() { stateOf = restore })
+
+	asks := 0
+	stateOf = func(context.Context, string) []string {
+		asks++
+		if asks < 3 {
+			return []string{"it is locked"}
+		}
+		return nil // somebody unlocked it
+	}
+	if err := awaitAwake(context.Background(), "a-device", time.Minute); err != nil {
+		t.Fatalf("awaitAwake = %v, want it to carry on once the phone is unlocked", err)
+	}
+	if asks < 3 {
+		t.Errorf("the phone was asked %d time(s); it must be asked AGAIN after the "+
+			"first refusal, or nothing is being waited for", asks)
+	}
+}
+
+// And it still gives up, with the reason the phone last gave, rather than
+// waiting for somebody who is not coming.
+func TestTheGuardGivesUpOnAPhoneNobodyTouches(t *testing.T) {
+	restore := stateOf
+	t.Cleanup(func() { stateOf = restore })
+	stateOf = func(context.Context, string) []string { return []string{"it is asleep"} }
+
+	err := awaitAwake(context.Background(), "a-device", time.Nanosecond)
+	if err == nil {
+		t.Fatal("awaitAwake = nil for a phone that never woke")
+	}
+	if !strings.Contains(err.Error(), "it is asleep") {
+		t.Errorf("the refusal does not name what the phone last said:\n%v", err)
+	}
+}
+
+// ⛔ AND AN ALREADY-USABLE PHONE IS NOT MADE TO WAIT A SECOND. The wait polls on
+// a one-second tick, and paying that on every run of every probe is a cost no
+// measurement needs.
+func TestAUsablePhoneIsNotDelayed(t *testing.T) {
+	restore := stateOf
+	t.Cleanup(func() { stateOf = restore })
+	stateOf = func(context.Context, string) []string { return nil }
+
+	start := time.Now()
+	if err := awaitAwake(context.Background(), "a-device", time.Minute); err != nil {
+		t.Fatalf("awaitAwake = %v on a usable phone", err)
+	}
+	if waited := time.Since(start); waited > 500*time.Millisecond {
+		t.Errorf("a usable phone was delayed %v; the first look must be enough", waited)
+	}
+}
+
+// A cancelled context ends the wait, because a person who has stopped the run
+// has answered the question.
+func TestCancellingTheRunEndsTheWait(t *testing.T) {
+	restore := stateOf
+	t.Cleanup(func() { stateOf = restore })
+	stateOf = func(context.Context, string) []string { return []string{"it is locked"} }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := awaitAwake(ctx, "a-device", time.Hour); !errors.Is(err, context.Canceled) {
+		t.Fatalf("awaitAwake = %v, want context.Canceled", err)
 	}
 }
 
