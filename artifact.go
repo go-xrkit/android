@@ -12,6 +12,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ArtifactEnv names the directory artefacts are written to, overriding the
@@ -104,6 +105,19 @@ func SaveTranscript(name, text string) (string, error) {
 func SaveFrame(name string, img *image.RGBA) (string, error) {
 	if img == nil {
 		return "", fmt.Errorf("%w: there is no frame to save", ErrInvalidOption)
+	}
+	// ⛔⛔ A NAME IS A FILENAME AND NOT A PATH. This is joined to a directory
+	// chosen by the rule above, and a name carrying separators would walk out of
+	// it — which is the defect the companion tool shipped with, found by an
+	// audit of this same change: "frame-/../../../etc/cron.d/x.png" passed a
+	// prefix-and-suffix check and resolved two levels above the directory. Here
+	// the caller is this module's own probes rather than a device, so this is
+	// the cheaper half of that lesson: refuse anything that is not one element,
+	// at the one place every frame goes through.
+	if name != filepath.Base(name) || name == "." || name == ".." ||
+		strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator) {
+		return "", fmt.Errorf("%w: %q is a path rather than a filename, and a frame is "+
+			"written beside the transcript or nowhere", ErrInvalidOption, name)
 	}
 	dir := os.Getenv("HOME")
 	if dir == "" {
