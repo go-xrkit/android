@@ -39,6 +39,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -68,6 +69,13 @@ func run(ctx context.Context, args []string) int {
 	// decoding time, so one run settles it.
 	format := fs.String("format", "", "force a format: yuy2 or mjpeg (empty asks "+
 		"PickFormat, which prefers the one needing no decoder)")
+	// ⭐ THE FRAMES EXIST TO BE TRACKED, NOT TO BE ADMIRED. go-xrkit/xrkit's
+	// headflow recovers a yaw from a stream of these, and it lives in a module
+	// whose dependency tree this one has no business acquiring — so the frames
+	// go out as PNGs and the tracker reads them there. See android.SaveFrame for
+	// why a file is the interface and why they never land in a work tree.
+	keep := fs.Int("keep", 0, "write this many frames out as PNGs, for replaying "+
+		"through a tracker (0 writes none)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -294,7 +302,7 @@ func run(ctx context.Context, args []string) int {
 	// arrive? Everything above is agreement — the kernel's and the camera's —
 	// and agreement has been mistaken for pixels once already in this file.
 	say("")
-	code := stream(ctx, h, neg, ep, size, say)
+	code := stream(ctx, h, neg, ep, size, *keep, say)
 	sayDebt(h, say)
 	return code
 }
@@ -307,7 +315,8 @@ func run(ctx context.Context, args []string) int {
 // which is what go-xrkit/xrkit/headflow itself refuses to track on when it is
 // zero: a frame with no structure cannot be a reference for anything.
 func stream(ctx context.Context, h *android.USBHandle, neg android.UVCNegotiation,
-	ep android.USBEndpoint, size android.UVCFrameSize, say func(string, ...any)) int {
+	ep android.USBEndpoint, size android.UVCFrameSize, keep int,
+	say func(string, ...any)) int {
 	s, err := h.Stream(neg, ep, size.Width, size.Height)
 	if err != nil {
 		say("STEP 8 stream                FAILED: %v", err)
@@ -315,7 +324,14 @@ func stream(ctx context.Context, h *android.USBHandle, neg android.UVCNegotiatio
 	}
 	defer func() { _ = s.Close() }()
 
-	const want = 10
+	// ⚠ TEN IS ENOUGH TO ANSWER "DO PIXELS ARRIVE", AND NOT ENOUGH TO TRACK A
+	// TURN. A head sweeps over a second or two and this camera gives ten frames
+	// a second, so -keep raises the count to what it asks for: a tracker handed
+	// ten frames of a two-second turn has eight gaps in it.
+	want := 10
+	if keep > want {
+		want = keep
+	}
 	deadline := time.Now().Add(15 * time.Second)
 	rctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
@@ -343,6 +359,20 @@ func stream(ctx context.Context, h *android.USBHandle, neg android.UVCNegotiatio
 		for x := 0; x < size.Width; x++ {
 			l := row[x*4]
 			lo, hi = min(lo, l), max(hi, l)
+		}
+		if got <= keep {
+			// ⛔ WRITTEN HERE AND NOT COLLECTED FIRST. Holding ten 640x480
+			// frames is 12 MB on a phone, and a tracker wants them IN ORDER
+			// with nothing dropped between them — so each goes out as it
+			// arrives, numbered, and the numbering is what the replay reads.
+			// The frames are also why this loop may not be hurried: see
+			// android.SaveFrame for where they may go and why nowhere else.
+			name := fmt.Sprintf("frame-%03d.png", got)
+			if path, err := android.SaveFrame(name, img); err != nil {
+				say("⚠ frame %d could not be written: %v", got, err)
+			} else if got == 1 {
+				say("    frames go to %s", filepath.Dir(path))
+			}
 		}
 	}
 	elapsed := time.Since(start)
