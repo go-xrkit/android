@@ -781,11 +781,17 @@ STEP 4 select alternate 6    OK — bandwidth reserved
 ANSWER YES — the kernel ACCEPTED an isochronous request on endpoint 0x81
 ```
 
-⚠ **Accepted is not streaming.** The probe submits one request and cancels it:
-that says the kernel takes the call, not that pixels arrive. What remains is a
-UVC implementation — the probe/commit negotiation, frame assembly from the
-packet descriptors, and decoding the format — and none of it is written. But
-nothing of it is blocked any more.
+⚠ **Accepted is not streaming**, which is why this step is only a step: the probe
+submits one request and cancels it, and that says the kernel takes the call, not
+that pixels arrive.
+
+⭐ **What this paragraph used to say was missing is now written and measured** —
+the probe/commit negotiation, frame assembly from the packet descriptors, and
+decoding both YUY2 and MJPEG. A worn head turn comes back as 197.9° of travel;
+see [the stream](#the-stream-reaping-assembling-decoding) below. The distinction
+is kept rather than deleted, because it held for four releases: *accepted* was
+true here long before *arriving* was, and reading one as the other is the mistake
+this whole file is a record of.
 
 ### ⛔⛔ Three walls were reported here as platform limits. All three were OUR BUGS
 
@@ -992,6 +998,13 @@ The decisions that are easy to get silently wrong, and what each one is:
 | **`Late` is counted apart from `Dropped`** | a dropped frame is the bus's fault and says the link is lossy; a late one is OURS and says the consumer is slower than the camera. One counter for both makes a slow tracker look like a bad cable |
 | **luminance goes into all three channels** | not a shortcut: `headflow.Profile` sums R+G+B down each column, so grey carries exactly what it reads, and every other byte of YUY2 *is* the luminance. A full YUV conversion would compute chrominance for it to add up and discard |
 | **a reaped URB is matched by ADDRESS, compared as a number** | converting the kernel's answer back to a `*usbdevfs_urb` is the unsafe misuse `go vet` refuses, and nothing keeps that object alive across the round trip. The slot already knows its own memory |
+
+⚠ **The third row is a YUY2 rule and not a universal one.** A compressed frame's
+length is whatever the compressor made it, so "shorter than expected" describes a
+*scene* rather than a loss; what tells a finished MJPEG frame from one the bus cut
+in half is its **markers**. `NewFrameAssemblerFor` takes the format for exactly
+that reason — the two ways of deciding "whole" are not interchangeable, and
+either one applied to the other format produces nothing.
 
 ⛔⛔ **One request can complete TWO frames, and the first version of this code
 returned only the last.** A frame small enough to fit in fewer than eight
@@ -1767,13 +1780,18 @@ Deliberate, and stated rather than hidden:
   `ACCESS_LOCAL_NETWORK` — mandatory from Android 17 for anything that accepts
   an incoming connection. The commands sidestep it by writing transcripts, which
   is why they work at all; making one reachable is unwritten;
-- **head tracking on Android is UNFINISHED, not blocked.** usbfs reaches the
-  headset's camera on an unrooted phone — the kernel accepts an isochronous
-  request, measured — and what is missing is the UVC probe/commit negotiation,
-  frame assembly and format decoding. See
-  [above](#-usbfs-works-on-an-unrooted-phone). Three earlier entries here said
-  it was impossible; all three were our own bugs, and that story is kept because
-  it is the more useful half;
+- **head tracking on Android WORKS, and the rate is the camera's.** A worn
+  left-right sweep comes back as **197.9° of travel** — out to −52°, back through
+  zero, out to +80° — through usbfs on an unrooted phone, at **~10 frames a
+  second**. That rate is flat across a fourfold change in pixel count, so it is a
+  ceiling on the camera's own frame production rather than anything here: MJPEG
+  is worse on this device (1.97 fps, and it truncates its own frames) and 320×240
+  is no faster. Enough for choosing which screen somebody faces, which
+  `headflow` puts at 107 ms; not enough for locking a picture to the head at 1:1,
+  which wants under 20 ms and never was. **Three earlier entries here said this
+  was impossible and a fourth said it was unwritten**; the first three were our
+  own bugs and the fourth was stale for four releases. Both stories are kept,
+  because being wrong in that direction is the more useful half;
 - **nobody has read a pixel back off the glasses, and nobody can.** An ordinary
   application may not capture a display it does not own, so
   [`Screen`](#painting-on-the-glasses-from-go) can report how many frames the
