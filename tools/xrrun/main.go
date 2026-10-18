@@ -86,8 +86,8 @@ type options struct {
 	// the other for somebody to come back to their desk.
 	hands   time.Duration
 	build   bool
-	install  bool
-	pull     bool
+	install bool
+	pull    bool
 }
 
 func run(ctx context.Context, argv []string) error {
