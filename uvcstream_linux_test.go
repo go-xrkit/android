@@ -337,6 +337,12 @@ func TestACallerSlowerThanTheCameraLosesTheOldestFrames(t *testing.T) {
 	// StreamPacketsPerURB of them. A 320x2 frame takes two packets, four frames
 	// fit, and four is not more than four — the first version of this test
 	// never reached the shedding at all and passed anyway.
+	//
+	// ⛔⛔ AND THE CEILING IS MaxPendingFrames, WHICH USED TO BE StreamURBs. That
+	// was a coincidence: raising the ring from 4 to 16 for a measured doubling of
+	// the frame rate made this branch unreachable, and the gate caught it. The
+	// two numbers answer different questions — how many requests are in flight,
+	// and how stale a frame may be before a tracker stops wanting it.
 	const w, h = 320, 1
 	whole := w * h * BytesPerPixelYUY2
 	f := &fakeStream{t: t, packet: 3072}
@@ -358,7 +364,7 @@ func TestACallerSlowerThanTheCameraLosesTheOldestFrames(t *testing.T) {
 	st := s.Stats()
 	if st.Late == 0 {
 		t.Fatalf("%d frames completed in one request against a ceiling of %d and none "+
-			"was shed; the queue has no ceiling (%s)", st.Frames, StreamURBs, st)
+			"was shed; the queue has no ceiling (%s)", st.Frames, MaxPendingFrames, st)
 	}
 	// Every frame the assembler finished is either delivered, still queued, or
 	// counted late. ⛔ A COUNTER THAT DOES NOT ADD UP IS THE DEFECT THIS WHOLE

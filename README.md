@@ -1091,11 +1091,34 @@ below were fixed:
 | payload the camera committed to | 2400 B | 800 B | 800 B |
 | decode, **on the phone** | 3.86 ms | 1.0 ms | **19.84 ms** |
 
-**Flat at ~10 fps across a fourfold change in pixel count.** That is the
-signature of a ceiling on the device's own frame production, not of a bandwidth
-limit — the camera lowered its byte rate with the frame size and kept the rate.
-So the prediction that a smaller frame would reach 25 fps is **refuted**: it
-reaches 10, which is what 640×480 already reached.
+⛔⛔ **AND THE CONCLUSION DRAWN FROM THAT TABLE WAS WRONG.** It said: *flat at
+~10 fps across a fourfold change in pixel count, so a ceiling on the camera's own
+frame production.* Every number above was taken with `StreamURBs = 4`, and the
+ring was starving — the consumer worked for longer than four milliseconds and the
+packets arriving in the gap were gone. Raising it to **16**, on the same phone in
+the same session:
+
+| `StreamURBs` | fps | dropped |
+|---|---|---|
+| 4 | 10.5 | 79 |
+| 8 | 21.5 | 14 |
+| **16** | **23.8** | **0** |
+| 32 | 0 | the camera stops sending |
+
+**23.8 fps against the 25 the camera advertises, and nothing dropped.** The
+camera was never the ceiling; we were. At 320×240 the same change takes 10 fps
+and 10 drops to **14.8 fps and none** — measured over 10 frames, which includes
+the start-up wait, so its *sustained* rate is **not** measured and the "flat
+across pixel count" claim is withdrawn rather than replaced.
+
+⚠ **The experiment that misled me was right about its own conditions.** "Sixteen
+requests changed nothing" was measured with a consumer costing 0.3 ms, where a
+four-millisecond ring is ample. Ring depth matters exactly when the consumer
+costs more than the ring covers — which is the mechanism I had already measured
+as *too small to matter* and noted was "real and simply below threshold". It went
+above threshold the moment a tracker joined the loop, and I did not re-run the
+experiment under the new condition. **A negative result carries its conditions
+with it.**
 
 ⛔ **And MJPEG is worse on this camera, not better.** It advertises 30 fps at
 every size; it negotiates a **third** of the bandwidth (800 bytes an interval
@@ -1109,10 +1132,12 @@ workstation's: 19.84 ms for MJPEG is **60 % of a 30 fps interval** where the Mac
 said 15–18 %. Keeping `PickFormat` on YUY2 until this run existed was the right
 call, and the run confirms it rather than merely permitting it.
 
-⚠ **What ~10 fps is enough for** is the question that matters, and `headflow`
+⚠ **What the rate is enough for** is the question that matters, and `headflow`
 answers it: choosing which screen somebody faces is comfortable at 107 ms, and
-this is 100. Holding a picture locked to the head at 1:1 wants under 20 ms and
-was already out of reach.
+**23.8 fps is 42**. Holding a picture locked to the head at 1:1 wants under
+20 ms, so a frame interval of 42 ms plus 4.8 ms of work is still short of it —
+but it is twice as close as the shipped default was, and the gap is now the
+camera's 25 fps rather than anything in this code.
 
 ### ⭐⭐⭐ And a real head turn, measured end to end
 
@@ -1159,10 +1184,17 @@ TRACKED 91 frame(s) in 8.001s — 11.4 fps
 ANSWER 748.5° of travel, -26.3° to 113.2°, over 86 matched frame(s)
 ```
 
-**790 µs of an 88 ms interval is 0.9 %**, and the decode is another 4.6 %. So the
-camera's ~10 frames a second is the ceiling and the arithmetic is free — which
-was a prediction until this ran, and predictions have been wrong twice in this
-file.
+**790 µs of an 88 ms interval is 0.9 %**, and the decode is another 4.6 %. The
+arithmetic is free — which was a prediction until this ran, and predictions have
+been wrong twice in this file.
+
+⛔⛔ **AND THAT RUN'S 11.4 fps WAS OUR OWN CEILING, WHICH THIS PROBE IS WHAT
+EXPOSED.** It drops 101 frames for every 91 delivered, and a consumer costing
+4.8 ms against a ring covering 4 ms is exactly the starvation this file had
+declared too small to matter. Raising `StreamURBs` to 16 gives **23.8 fps and
+nothing dropped**; see [the ring](#-the-ring-depth-was-the-cause-and-the-control-that-said-otherwise-was-narrow).
+The numbers above are kept as they were taken, because the probe that found the
+ceiling is the one that was running under it.
 
 ⛔⛔ **The row that says `90 differed, 0 identical` is there because two earlier
 runs read "the head did not move" and I could not tell whether that was true.**
@@ -1232,13 +1264,26 @@ Worked through from the numbers of that same run, and it **closes**:
 | 10 whole frames + 12 fragments | 6 144 000 + 702 160 = **6 846 160 bytes, the measured total** |
 
 So **no packets are being lost at all** — 97 % of the schedule arrives — and the
-frame rate is bounded by *how much the camera puts in each packet*. Nothing in
-this code is in the way, which is the opposite of what a dropped-frame counter
-suggests.
+frame rate is bounded by *how much the camera puts in each packet*.
 
-⛔ **Two of my own explanations died here, and measurement killed both.** That the
-ring was too shallow: refuted by sixteen requests delivering the same ten frames.
-That the *consumer* starved it: refuted by a benchmark —
+⛔⛔ **THE BUDGET CLOSED AND THE CAUSAL READING WAS BACKWARDS.** Every figure in
+that table is real, and "the camera under-fills each interval" is a true
+description of what the bytes did. What it is not is a statement about the
+camera: with `StreamURBs = 16` the *same camera* fills **77 %** of each interval
+and delivers 23.8 fps. It under-filled because **nothing was asking** — the ring
+was dry while the consumer worked, and an isochronous endpoint with no request
+outstanding is a schedule with nowhere to put the bytes.
+
+⭐ **An identity that balances tells you which quantities are related, not which
+of them the device is holding fixed.** I read "832 bytes an interval" as the
+camera's choice; it was ours. The way to tell is to vary one of them on the
+device, which the sweep above finally did.
+
+⛔ **Two of my own explanations died here, and one of them came back.** That the
+ring was too shallow: *refuted* by sixteen requests delivering the same ten
+frames — and **that refutation was wrong**, because it was measured with a
+consumer costing 0.3 ms where four milliseconds of ring is ample. That the
+*consumer* starved it: refuted by a benchmark —
 
 ```
 BenchmarkDecodeAFrame/640x480     0.25–0.43 ms/frame   0 allocs
@@ -1250,17 +1295,24 @@ numbers spread accordingly. The conclusion survives it because it is an
 order-of-magnitude question rather than a close one: a hole of 32 ms cannot be
 explained by 0.3 ms of work.
 
+⛔⛔ **AND THAT WAS THE RIGHT ANSWER TO THE WRONG QUESTION.** `cmd/xrusb`'s
+consumer costs 0.3 ms, so for *it* the ring is never starved — and I generalised
+that into "ring depth is not what bounds this", which held until a **tracker**
+joined the loop and the consumer cost 4.8 ms. Then the ring at 4 lost two frames
+in three. The benchmark measured the consumer I had; the conclusion was about
+every consumer there would ever be.
+
 **The prediction this earned**: a smaller frame should reach the full rate.
 320×240 at 25 fps needs **480 bytes an interval**, well inside the 832 measured,
 and `MinTrackingWidth` is 320 so `headflow` still accepts it — four-wide bins
 make eighty of them.
 
-⛔⛔ **IT WAS WRONG, AND THE DEVICE SAID SO.** 320×240 delivers **10 fps**, the
-same as 640×480 — because the camera committed to only **800** bytes an interval
-there, a third of what it took at 640×480. It lowered its byte rate with the
-frame size and kept the frame rate. The budget closing told us what bounded the
-*bytes*; it could not tell us the camera was choosing both numbers. See the
-three-way measurement above for what actually holds.
+⛔⛔ **IT WAS WRONG, AND THE DEVICE SAID SO — TWICE, IN OPPOSITE DIRECTIONS.**
+320×240 delivered **10 fps**, the same as 640×480, and I read that as the camera
+choosing both its byte rate and its frame rate. It was the **ring** choosing
+both: with `StreamURBs = 16` the same 320×240 gives **14.8 fps and no drops**,
+and 640×480 gives **23.8**. The prediction was wrong, the refutation of it was
+wrong, and what settled it was varying the one thing neither had varied.
 
 ⭐ **And MJPEG is in the frame path now**, which was the other half of the
 prediction, and it is **worse on this camera** — 1.97 fps. A compressed frame is
@@ -1275,15 +1327,26 @@ prediction that was *also* wrong — because an identity that balances tells you
 which quantities are related, not which of them the device is holding fixed. Only
 varying one of them on the device says that.
 
-⭐ **The ring depth is not the cause, and a control says so rather than a story.**
+### ⛔⛔ The ring depth WAS the cause, and the control that said otherwise was narrow
+
 Deepening it looked obviously right: a 640×480 YUY2 frame at 2400 bytes an
-interval takes 32 ms, while four 8-packet requests cover four. Measured:
+interval takes 32 ms, while four 8-packet requests cover four. The first
+measurement, with `cmd/xrusb` and its 0.3 ms consumer:
 
 | requests × packets | packets/s | whole frames |
 |---|---|---|
 | 4 × 8 | 7744 | 10 |
 | 16 × 8 | 7968 | 10 |
 | 4 × 32 | **480** | **0** |
+
+⛔ Read as "ring depth is not what bounds this", which **held only for that
+consumer**. With `cmd/xrhead` spending 4.8 ms a frame decoding and tracking, the
+same axis gives 10.5 → 21.5 → **23.8 fps** and 79 → 14 → **0** dropped. The
+shipped default of 4 was halving the frame rate for five releases.
+
+⚠ Thirty-two *requests* fails the same way thirty-two *packets a request* does —
+and neither is explained by their product, since 4 × 32 and 16 × 8 are both 128
+packets and only one of them works. Two axes, two ceilings, measured not reasoned.
 
 Thirty-two packets a request made the camera stop sending altogether — 480
 packets in fifteen seconds, carrying eleven bytes each. Putting 8 back with the
@@ -1826,16 +1889,20 @@ Deliberate, and stated rather than hidden:
   0.9 %**. A worn
   left-right sweep replayed offline comes back as **197.9° of travel** — out to
   −52°, back through
-  zero, out to +80° — through usbfs on an unrooted phone, at **~10 frames a
-  second**. That rate is flat across a fourfold change in pixel count, so it is a
-  ceiling on the camera's own frame production rather than anything here: MJPEG
-  is worse on this device (1.97 fps, and it truncates its own frames) and 320×240
-  is no faster. Enough for choosing which screen somebody faces, which
-  `headflow` puts at 107 ms; not enough for locking a picture to the head at 1:1,
-  which wants under 20 ms and never was. **Three earlier entries here said this
-  was impossible and a fourth said it was unwritten**; the first three were our
-  own bugs and the fourth was stale for four releases. Both stories are kept,
-  because being wrong in that direction is the more useful half;
+  zero, out to +80° — through usbfs on an unrooted phone. **The rate is
+  23.8 fps with nothing dropped**, against the 25 the camera advertises, once
+  `StreamURBs` is 16; at the 4 this shipped with for five releases it was 10.5
+  with two frames in three lost, and **an entry here called that the camera's own
+  ceiling.** It was ours. MJPEG remains worse on this device (1.97 fps, and it
+  truncates its own frames). Enough for choosing which screen somebody faces,
+  which `headflow` puts at 107 ms against this 42; still short of locking a
+  picture to the head at 1:1, which wants under 20 ms. **Three earlier entries
+  here said this was impossible, a fourth said it was unwritten, and a fifth
+  blamed the camera for a rate we were imposing**; the first three were our
+  own bugs, the fourth was stale for four releases, and the fifth read our own
+  starvation as the hardware's limit. All of them are kept, because being wrong
+  in that direction — about what the platform allows, and about whose ceiling a
+  number is — is the more useful half;
 - **nobody has read a pixel back off the glasses, and nobody can.** An ordinary
   application may not capture a display it does not own, so
   [`Screen`](#painting-on-the-glasses-from-go) can report how many frames the

@@ -243,10 +243,14 @@ func track(ctx context.Context, s *android.UVCStream, size android.UVCFrameSize,
 		say("    the decode: %s a frame", (st.Decoding /
 			time.Duration(st.Frames)).Round(10*time.Microsecond))
 	}
-	// ⛔⛔ THE CONTROL THAT MAKES THE VERDICT READABLE. "0° of travel" is
-	// consistent with a still head AND with a blind wiring, and this is what
-	// tells them apart: if the middle row changes between frames and the yaw
-	// does not, the fault is here.
+	// ⛔⛔ WHAT THIS CONTROL DOES AND DOES NOT SAY. It was added because "0° of
+	// travel" is consistent with a still head AND with wiring that hands back
+	// one picture — and it answers the second question only. IDENTICAL frames
+	// mean the stream is not delivering: a camera on a real room produces sensor
+	// noise and is never byte-identical. DIFFERENT frames mean nothing about
+	// movement, because that same noise changes every pixel while the column
+	// profile still matches at a shift of zero. Reading them the other way round
+	// had this probe accusing its own plumbing on three consecutive runs.
 	say("    consecutive frames: %d differed, %d identical", different, same)
 	if stopped != nil && !errors.Is(stopped, context.DeadlineExceeded) {
 		say("    STOPPED BY: %v", stopped)
@@ -263,22 +267,34 @@ func track(ctx context.Context, s *android.UVCStream, size android.UVCFrameSize,
 			frames, headflow.MinConfidence)
 		return 1
 	case travel < 1 && different == 0:
-		say("ANSWER THE CAMERA IS SEEING ONE PICTURE. %d frame(s) matched, the view "+
-			"travelled %.3f°, and NO two consecutive frames differed — so the scene "+
-			"is static, which is the useful negative: a tracker that invented "+
-			"movement would show it here.", used, travel)
-		return 0
-	case travel < 1:
-		// ⛔⛔ THE PIXELS CHANGED AND THE YAW DID NOT, which cannot be a still
-		// head. Something between the frames and the tracker is wrong, and
-		// saying "the head did not move" here would be this probe lying about
-		// its own plumbing.
-		say("⛔ ANSWER THE PIXELS CHANGED AND THE YAW DID NOT. %d of %d consecutive "+
-			"frames differed, %d frame(s) matched at confidence %.3f, and the view "+
-			"travelled %.3f°. A still head cannot produce that: the fault is "+
-			"between the frames and the tracker, not in front of the camera.",
-			different, different+same, used, tr.Confidence(), travel)
+		// ⛔⛔ IDENTICAL FRAMES ARE THE PLUMBING CONCERN, and this is the branch
+		// that earns its keep. The stream hands back a REUSED image; if its
+		// pixels never change between calls, the camera is sending duplicates
+		// or nothing is being written into it, and a tracker reading one picture
+		// would report a confident zero forever.
+		say("⛔ ANSWER EVERY FRAME WAS IDENTICAL. %d frame(s) matched at confidence "+
+			"%.3f and no two consecutive frames differed by a single byte in the "+
+			"band the tracker reads. A camera pointed at a real room produces "+
+			"sensor noise, so this is the stream handing back one picture rather "+
+			"than a still scene.", used, tr.Confidence())
 		return 1
+	case travel < 1:
+		// ⛔⛔ AND THIS BRANCH USED TO ACCUSE THE PLUMBING, WRONGLY. It said "the
+		// pixels changed and the yaw did not, so a still head cannot produce
+		// that" — but SENSOR NOISE changes every pixel of every frame without
+		// the view moving at all, and the column profile still matches at a
+		// shift of zero with a confidence of 0.99. Three runs in a row were
+		// reported as a fault in this wiring when the wiring was fine and the
+		// head was simply still. "The pixels changed" is not "the camera moved",
+		// and an instrument that accuses the wrong thing is worse than one that
+		// says nothing.
+		say("ANSWER THE VIEW DID NOT PAN. %d frame(s) matched at confidence %.3f and "+
+			"the view travelled %.3f°; %d of %d consecutive frames differed, which "+
+			"is sensor noise rather than movement — a camera on a real room is "+
+			"never byte-identical. That is the useful negative: a tracker that "+
+			"invented movement would show it here. Turn your head and run it again.",
+			used, tr.Confidence(), travel, different, different+same)
+		return 0
 	}
 	// ⭐ THE BUDGET, WHICH IS THE POINT OF RUNNING THIS ON THE PHONE. The frame
 	// interval is what everything has to fit inside.
