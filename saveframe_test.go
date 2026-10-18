@@ -116,18 +116,18 @@ func TestSaveFrameRefusesWhatItCannotWrite(t *testing.T) {
 			t.Fatalf("SaveFrame(nil) = %v, want ErrInvalidOption", err)
 		}
 	})
-	t.Run("a directory it cannot write into", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("root writes into a mode-0 directory, so there is nothing to refuse")
-		}
-		dir := t.TempDir()
-		if err := os.Chmod(dir, 0); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-		t.Setenv("HOME", dir)
+	// ⛔⛔ A DIRECTORY THAT IS NOT THERE, NOT ONE WITH NO PERMISSIONS. The first
+	// version chmod'ed a directory to 0, which cost two lanes: Windows has no
+	// POSIX permission bits, so the write SUCCEEDED and the test failed there;
+	// and root ignores the mode, so the test skipped itself inside a container
+	// and silently took the coverage with it. A missing directory fails on every
+	// platform and for every user, with no permission model involved at all.
+	// TestSaveTranscriptReportsADirectoryItCannotWriteTo next door already did
+	// it this way, and reading it first would have saved both.
+	t.Run("a directory that is not there", func(t *testing.T) {
+		t.Setenv("HOME", filepath.Join(t.TempDir(), "not-there"))
 		if _, err := android.SaveFrame("frame-001.png", bars(8, 8)); err == nil {
-			t.Fatal("a frame was reported as written into a directory with no permissions")
+			t.Fatal("a frame was reported as written into a directory that is not there")
 		}
 	})
 }
