@@ -7,6 +7,7 @@
 package android
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -101,10 +102,23 @@ type UVCStream struct {
 	// so holding them costs nothing but the memory and nothing dangles.
 	pending [][]byte
 
+	// frames carries assembled frames from the reader to the caller, and stop
+	// ends the reader.
+	//
+	// ⛔ THE CHANNEL IS THE HANDOVER, AND ITS DEPTH IS [MaxPendingFrames]. A
+	// reader that blocked on a full channel would be starving the ring again
+	// through a different door, so it sheds the oldest instead and counts it.
+	frames chan []byte
+	stop   chan struct{}
+	done   chan struct{}
+
 	// late counts frames thrown away because the caller had not come back for
-	// the ones before them. It is not guarded: it is written and read on the
-	// single reader's goroutine, like pending and the ring.
+	// the ones before them.
 	late int
+	// readerErr is why the reader stopped, when it was not asked to.
+	readerErr error
+	// reading says the reader goroutine was launched; see started.
+	reading bool
 	// decoding is how long the decodes have taken in all, which is the only
 	// honest measure of what a format costs on the processor that runs it.
 	decoding time.Duration
@@ -150,7 +164,12 @@ func (h *USBHandle) Stream(neg UVCNegotiation, ep USBEndpoint, w, h2 int) (*UVCS
 		return nil, fmt.Errorf("%w: endpoint %#02x carries %d bytes an interval",
 			ErrInvalidOption, ep.Address, packet)
 	}
-	s := &UVCStream{h: h, ep: ep, asm: asm, neg: neg}
+	s := &UVCStream{
+		h: h, ep: ep, asm: asm, neg: neg,
+		frames: make(chan []byte, MaxPendingFrames),
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+	}
 	for i := 0; i < StreamURBs; i++ {
 		slot := newURBSlot(ep, packet)
 		s.ring = append(s.ring, slot)
@@ -162,6 +181,16 @@ func (h *USBHandle) Stream(neg UVCNegotiation, ep USBEndpoint, w, h2 int) (*UVCS
 			return nil, err
 		}
 	}
+	// ⛔ THE READER STARTS ONLY ONCE EVERY REQUEST IS QUEUED. Starting it inside
+	// the loop would have it reaping while this one is still submitting, and the
+	// ring is single-owner state — the reader's, from here on.
+	s.mu.Lock()
+	s.reading = true
+	s.mu.Unlock()
+	go func() {
+		defer close(s.done)
+		s.read()
+	}()
 	return s, nil
 }
 
@@ -233,65 +262,149 @@ func (s *UVCStream) submit(slot *urbSlot) error {
 // after [UVCStream.Close].
 func (s *UVCStream) Frame(ctx context.Context) (*image.RGBA, error) {
 	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		s.mu.Lock()
-		closed := s.closed
-		s.mu.Unlock()
-		if closed {
-			return nil, ErrClosed
+		// ⛔ A CONTEXT ALREADY CANCELLED IS REPORTED BEFORE ANYTHING ELSE IS
+		// LOOKED AT. The select below has two cases that can both be ready at
+		// once — a closed handover and a cancelled caller — and select picks
+		// among ready cases at RANDOM, so without this the same call answered
+		// ErrClosed or context.Canceled depending on the coin. The caller's own
+		// cancellation is the more specific answer, and a test asserts it.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
 		}
 
-		// A frame a previous request left over is handed out before the kernel
-		// is asked for more, or it would be held while fresher ones arrive.
-		if len(s.pending) > 0 {
-			frame := s.pending[0]
-			s.pending = s.pending[1:]
-			// ⛔⛔ THE DECODE IS TIMED, ON THE DEVICE, because the choice
-			// between YUY2 and MJPEG turns on whether it fits the frame
-			// interval — and a benchmark on a workstation is an OPTIMISTIC
-			// bound for a phone, not a measurement of it. Measured on this Mac,
-			// MJPEG costs 3% of a 30 fps interval at 320x240, 15-18% at
-			// 640x480 and 69-84% at 1920x1080; what the phone does is what
-			// decides, and only this can say.
-			t0 := time.Now()
-			img, err := s.decode(frame)
-			s.decoding += time.Since(t0)
-			if err != nil {
-				// A frame that arrived whole and will not decode is the
-				// camera's fault, not the end of the stream: it is counted
-				// and the next frame is awaited. Ending here would turn one
-				// bad JPEG into a dead camera.
-				continue
+		var frame []byte
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case f, ok := <-s.frames:
+			if !ok {
+				// The reader stopped. Its reason, if it had one, is the
+				// stream's; ErrClosed is what an ordinary Close looks like.
+				s.mu.Lock()
+				err := s.readerErr
+				s.mu.Unlock()
+				return nil, cmp.Or(err, error(ErrClosed))
 			}
-			s.rgba = img
-			return img, nil
+			frame = f
+		}
+		// ⛔⛔ THE DECODE HAPPENS HERE, ON THE CALLER'S GOROUTINE, AND THAT IS
+		// THE WHOLE POINT OF THE READER. It used to happen between two reaps,
+		// so its cost was time with nothing submitted — and an isochronous
+		// endpoint with no request outstanding is a schedule with nowhere to put
+		// the bytes. Measured on a Pixel 11 Pro Fold: MJPEG decodes in 19 ms
+		// against a ring covering 16, and delivered 3.2 of its advertised
+		// 30 fps. Deepening the ring could not fix that — thirty-two requests
+		// make this camera stop sending — so the coupling had to go instead.
+		//
+		// It is still timed, because the choice between YUY2 and MJPEG turns on
+		// what it costs on the processor that has to run it, and a benchmark on
+		// a workstation is an optimistic bound rather than a measurement.
+		t0 := time.Now()
+		img, err := s.decode(frame)
+		s.mu.Lock()
+		s.decoding += time.Since(t0)
+		s.mu.Unlock()
+		if err != nil {
+			// A frame that arrived whole and will not decode is the camera's
+			// fault, not the end of the stream: it is counted and the next
+			// frame is awaited. Ending here would turn one bad JPEG into a
+			// dead camera.
+			continue
+		}
+		s.rgba = img
+		return img, nil
+	}
+}
+
+// read is the reader: it reaps, assembles and resubmits, and does nothing else.
+//
+// ⛔⛔ IT EXISTS SO THAT NOTHING THE CALLER DOES CAN STARVE THE RING. Every
+// millisecond spent here is a millisecond a request is outstanding; every
+// millisecond spent decoding, tracking or drawing is the caller's and happens
+// elsewhere. That separation is what the ring depth was standing in for — 4 to
+// 16 bought a doubling, and 32 is refused by the camera, so there was no more
+// room on that axis.
+//
+// It owns the ring and the pending queue outright: no other goroutine touches
+// them, which is why they need no lock while the counters do.
+func (s *UVCStream) read() {
+	defer close(s.frames)
+	for {
+		select {
+		case <-s.stop:
+			return
+		default:
 		}
 
 		slot, err := s.reap()
 		if err != nil {
-			return nil, err
+			s.mu.Lock()
+			s.readerErr = err
+			s.mu.Unlock()
+			return
 		}
 		if slot == nil {
-			// Nothing has completed. ⚠ THE SLEEP IS THE SCHEDULE, not a
-			// guess: at StreamPacketsPerURB packets a request each request
-			// covers four milliseconds, so there is nothing to collect sooner
-			// and a busy loop would burn a core to learn that.
-			// ⚠ THE WAKE-UP DOES NOT RETURN THE CONTEXT'S ERROR, the top of the
-			// loop does. Returning it here as well left a statement no test
-			// could reach without racing the sleep against the deadline — and a
-			// test that needs a race to cover a line is worse than the line.
+			// Nothing has completed. ⚠ THE SLEEP IS THE SCHEDULE, not a guess:
+			// at StreamPacketsPerURB packets a request, each covers four
+			// milliseconds, so there is nothing to collect sooner and a busy
+			// loop would burn a core to learn that.
 			select {
-			case <-ctx.Done():
+			case <-s.stop:
+				return
 			case <-time.After(time.Millisecond):
 			}
 			continue
 		}
 
+		// ⛔ DRAINED AND RESUBMITTED BEFORE ANYTHING IS HANDED OVER. The slot
+		// goes back to the kernel immediately; the frames it completed are then
+		// offered to the caller, and an offer that nobody is waiting for must
+		// not hold this loop.
 		s.drain(slot)
 		if err := s.submit(slot); err != nil {
-			return nil, err
+			s.mu.Lock()
+			s.readerErr = err
+			s.mu.Unlock()
+			return
+		}
+		// ⛔ THIS LOOP HAS NO CANCELLATION CASE AND MUST NOT GROW ONE. Every
+		// select in it carries a default, so not one of them can block: each
+		// turn either hands a frame over or makes room for one, so the loop
+		// ends within twice the length of the queue whatever the caller does.
+		// Watching s.stop here would add a branch no test can reach — a race
+		// between a ready send and a closed channel is decided by a coin — and
+		// the gate would be measuring luck. The outer loop reads s.stop, which
+		// is where a stream that has been closed belongs.
+		for len(s.pending) > 0 {
+			select {
+			case s.frames <- s.pending[0]:
+				s.pending = s.pending[1:]
+			default:
+				// ⛔⛔ THE CALLER IS BEHIND AND THE RING MAY NOT WAIT FOR IT.
+				// Blocking here would be the starvation this reader exists to
+				// remove, wearing a different hat.
+				//
+				// ⛔⛔ AND IT IS THE OLDEST *IN THE CHANNEL* THAT GOES, not the
+				// one being offered. A channel is a queue: dropping the new
+				// frame would leave the caller reading the four stalest, which
+				// is the opposite of what head tracking wants and is exactly
+				// what the first version of this reader did — the test caught
+				// it by asserting that the frame handed over is not the oldest.
+				// Making room at the front and pushing at the back keeps the
+				// freshest, which is the policy the queue had before the
+				// channel replaced it.
+				select {
+				case <-s.frames:
+					s.mu.Lock()
+					s.late++
+					s.mu.Unlock()
+				default:
+					// Drained by the caller between the two selects: there is
+					// room now, and the next turn of the loop will use it.
+				}
+			}
 		}
 	}
 }
@@ -384,15 +497,10 @@ func (s *UVCStream) drain(slot *urbSlot) {
 			s.pending = append(s.pending, f)
 		}
 	}
-	// ⛔ THE QUEUE HAS A CEILING AND IT DROPS THE OLDEST. A caller slower than
-	// the camera would otherwise grow this without bound, and the consumer here
-	// is head tracking: the FRESHEST frame is the one worth having, and a stale
-	// one delivered late is worse than none. Dropped frames are counted, so a
-	// caller that is too slow can SEE that it is.
-	for len(s.pending) > MaxPendingFrames {
-		s.pending = s.pending[1:]
-		s.late++
-	}
+	// ⚠ NOTHING IS SHED HERE ANY MORE. The ceiling moved to the handover in
+	// read, where it belongs: the queue this builds lives for one request, and
+	// the one that can grow behind a slow caller is the channel. Shedding in
+	// both places would have counted the same loss twice.
 }
 
 // Stats reports what the stream has seen.
@@ -428,6 +536,16 @@ func (s *UVCStream) Close() error {
 	s.closed = true
 	s.mu.Unlock()
 
+	// ⛔⛔ THE READER IS STOPPED AND WAITED FOR BEFORE A SINGLE REQUEST IS
+	// DISCARDED. It owns the ring; discarding underneath it would be two
+	// goroutines on the same slots, and the one that lost would be the kernel's.
+	// If Stream failed while submitting, there is no reader — the channels are
+	// made before the loop and done is closed by nobody, so the wait is on a
+	// nil-safe guard rather than on a goroutine that was never started.
+	close(s.stop)
+	if s.started() {
+		<-s.done
+	}
 	for _, slot := range s.ring {
 		if slot.out {
 			_ = discardURB(s.h.fd, slot)
@@ -435,4 +553,14 @@ func (s *UVCStream) Close() error {
 		}
 	}
 	return nil
+}
+
+// started reports whether the reader goroutine was ever launched.
+//
+// ⚠ Stream calls Close on a failed submit, BEFORE the reader exists, and
+// waiting on done then would wait forever. This is that case, named.
+func (s *UVCStream) started() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reading
 }

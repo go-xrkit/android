@@ -950,8 +950,8 @@ not a measurement of it.** The phone, measured through
 Three and a half to ten times slower at 640×480, so MJPEG there is **60 % of a
 30 fps interval** where the Mac said 15–18 %. Keeping `PickFormat` on YUY2 until
 that run existed was the right call, and the run confirms it rather than merely
-permitting it — the camera's MJPEG is also 1.97 fps, for reasons that are the
-camera's and are set out below.
+permitting it — MJPEG also delivered 1.97 fps at `StreamURBs` = 4 and 3.21 at
+16, for reasons that are **not** settled and are set out below.
 
 ### What is written, and what is not
 
@@ -978,15 +978,34 @@ The parts most likely to be silently wrong are pinned:
 
 ### The stream: reaping, assembling, decoding
 
-`USBHandle.Stream` keeps `StreamURBs` = 4 isochronous requests in flight, reaps
-them without blocking, assembles payloads into frames and decodes YUY2 into an
-`*image.RGBA` — which is what `headflow` takes.
+`USBHandle.Stream` keeps `StreamURBs` = 16 isochronous requests in flight, reaps
+them without blocking, assembles payloads into frames and decodes YUY2 or MJPEG
+into an `*image.RGBA` — which is what `headflow` takes.
 
-⛔ **Four in flight is not a tuning choice.** An isochronous endpoint is
-scheduled every microframe whether anybody is listening: between reaping one
-request and submitting the next, the camera's packets go nowhere. At
-`ISOPacketsPerURB` = 8 packets a request each covers a millisecond, so four
-leave three outstanding while one is being emptied.
+⛔ **Sixteen in flight is not a tuning choice, and neither was the 4 it replaced.**
+An isochronous endpoint is scheduled every microframe whether anybody is
+listening: between reaping one request and submitting the next, the camera's
+packets go nowhere. At `StreamPacketsPerURB` = 8 packets a request each covers
+four milliseconds, so the ring covers 16 ms of schedule. Four covered 4 ms, and
+that was the frame rate's ceiling for five releases — see *The ring was the
+ceiling* below. Thirty-two, on either axis, makes this camera stop sending
+altogether, which is why the next move was structural rather than another
+doubling.
+
+⛔⛔ **The reaping is a goroutine, and the decode is NOT in it.** `Frame` used to
+reap, assemble *and* decode in turn, so every millisecond of decoding was a
+millisecond with nothing submitted — the starvation above, wearing the
+consumer's hat instead of the ring's. The reader now does nothing but reap,
+assemble and resubmit, and hands whole frames over a channel of depth
+`MaxPendingFrames`; the decode happens on the caller's goroutine, where its cost
+is the caller's. The handover keeps the **freshest** frames: when it is full,
+room is made at the FRONT and the shed frame is counted in `Late`, because a
+tracker wants the newest picture and the oldest is the one worth losing.
+
+⚠ `MaxPendingFrames` is deliberately **not** `StreamURBs`. The two numbers answer
+different questions — how many requests are in flight, and how stale a frame may
+be before a tracker stops wanting it. They were the same constant until raising
+the ring made the shedding branch unreachable, and the coverage gate said so.
 
 The decisions that are easy to get silently wrong, and what each one is:
 
@@ -1079,15 +1098,19 @@ in 0s` is not a quiet camera: a quiet one still has its endpoint scheduled and
 still fills the wait. The reason was sitting in a discarded variable. The probe
 prints it now, and switches on the errno.
 
-### ⭐⭐ The frame rate is ~10 and not 25, and that is the CAMERA — measured three ways
+### ⭐⭐ "The frame rate is ~10 and not 25, and that is the CAMERA" — measured three ways, and WRONG
+
+⛔ The heading is kept in quotation marks because it is what this section
+originally claimed, and a heading is what a skimming reader takes away. It was
+**us**, not the camera; the refutation is in this section and in the next one.
 
 Three runs on 2026-10-18, same phone, same session, after the phantom frames
 below were fixed:
 
 | | YUY2 640×480 | YUY2 320×240 | MJPEG 640×480 |
 |---|---|---|---|
-| delivered | **9.41 fps** | **10 fps** | **1.97 fps** |
-| dropped | 1 | **0** | 67, every one missing its tail |
+| delivered | **9.41 fps** | **10 fps** | **1.97 fps** (3.21 at `StreamURBs` = 16) |
+| dropped | 1 | **0** | 67, every one missing its tail (68 at 16) |
 | payload the camera committed to | 2400 B | 800 B | 800 B |
 | decode, **on the phone** | 3.86 ms | 1.0 ms | **19.84 ms** |
 
@@ -1120,12 +1143,28 @@ above threshold the moment a tracker joined the loop, and I did not re-run the
 experiment under the new condition. **A negative result carries its conditions
 with it.**
 
-⛔ **And MJPEG is worse on this camera, not better.** It advertises 30 fps at
-every size; it negotiates a **third** of the bandwidth (800 bytes an interval
-against YUY2's 2400) and then **truncates its own frames** — all 67 losses had a
-start-of-image and no end-of-image, so the camera marks a frame finished before
-its picture is. Ten whole JPEGs out of 77 boundaries. The descriptor's 30 fps is
-a claim, not a capability.
+⚠ **MJPEG is slower on this camera, and WHY is an open question.** It advertises
+30 fps at every size and negotiates a **third** of the bandwidth (800 bytes an
+interval against YUY2's 2400); it delivered **1.97 fps** at `StreamURBs` = 4 and
+**3.21 fps** at 16, with every loss showing a start-of-image and no
+end-of-image — ten whole JPEGs out of 77 boundaries in the first run, 68 losses
+of the same shape in the second.
+
+⛔⛔ **I published that as "the camera truncates its own frames", and that
+conclusion is WITHDRAWN.** A missing tail is where the bytes stop arriving; it
+does not say who stopped sending them. The same signature is exactly what
+starvation produces — and starvation was demonstrably still present in the
+second run, because the MJPEG decode measured **19.09 ms** against a ring
+covering 16 ms, so the ring was empty for part of every frame. The honest
+statement is that the losses are **located** at the end of the picture and the
+cause is **not established**; mistaking a location for a cause is the same error
+this section already records twice.
+
+The decode has since moved off the reaping path entirely (see *The stream*
+above), which removes that explanation's mechanism. The run that would settle it
+has not been taken: a rate for MJPEG with a decoupled reader is **not measured
+here**, and until it is, neither "the camera truncates" nor "it was our
+starvation" is the fleet's position.
 
 ⭐ **The decode figures are now the phone's**, and they are 3.5–10× the
 workstation's: 19.84 ms for MJPEG is **60 % of a 30 fps interval** where the Mac
@@ -1315,7 +1354,8 @@ and 640×480 gives **23.8**. The prediction was wrong, the refutation of it was
 wrong, and what settled it was varying the one thing neither had varied.
 
 ⭐ **And MJPEG is in the frame path now**, which was the other half of the
-prediction, and it is **worse on this camera** — 1.97 fps. A compressed frame is
+prediction, and it is **slower on this camera** — 1.97 fps at a ring of 4, 3.21
+at 16, for reasons not yet established. A compressed frame is
 whole by its **markers** and an uncompressed one by its **length**, so the
 assembler had to learn which it is holding: `NewFrameAssemblerFor` takes the
 format, and `UVCNegotiation.Kind` is where it comes from, because a negotiation
@@ -1893,8 +1933,11 @@ Deliberate, and stated rather than hidden:
   23.8 fps with nothing dropped**, against the 25 the camera advertises, once
   `StreamURBs` is 16; at the 4 this shipped with for five releases it was 10.5
   with two frames in three lost, and **an entry here called that the camera's own
-  ceiling.** It was ours. MJPEG remains worse on this device (1.97 fps, and it
-  truncates its own frames). Enough for choosing which screen somebody faces,
+  ceiling.** It was ours. MJPEG remains slower on this device (1.97 fps at a ring
+  of 4, 3.21 at 16) and **why is an open question**: the losses all lack an
+  end-of-image, which locates them without naming a cause, and an earlier entry
+  here read that location as "the camera truncates its own frames". That reading
+  is withdrawn. Enough for choosing which screen somebody faces,
   which `headflow` puts at 107 ms against this 42; still short of locking a
   picture to the head at 1:1, which wants under 20 ms. **Three earlier entries
   here said this was impossible, a fourth said it was unwritten, and a fifth
