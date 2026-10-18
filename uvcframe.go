@@ -141,6 +141,9 @@ type FrameAssembler struct {
 	// compressor or at a corrupted middle, not at a lost tail. One counter for
 	// both would hide whichever is rarer.
 	badJPEG int
+	// noSOI and noEOI split the MJPEG losses by WHICH marker was missing: a
+	// buffer that began mid-picture against one that lost its tail.
+	noSOI, noEOI int
 }
 
 // Why a frame ended, for the per-boundary census.
@@ -274,6 +277,17 @@ func (a *FrameAssembler) Losses() (onToggle, onEOF int) {
 // the camera's compressor or at a corrupted middle rather than at a lost tail.
 func (a *FrameAssembler) BadJPEG() int { return a.badJPEG }
 
+// MissingMarkers splits the MJPEG frames that were dropped by WHICH marker they
+// lacked: one that began mid-picture, and one that lost its tail.
+//
+// ⛔ THEY ARE OPPOSITE FAULTS. No start-of-image means a boundary fired where
+// the camera had not finished a picture; a start with no end means the tail went
+// missing. "Dropped" cannot tell them apart, and they call for different
+// answers — the same reason [FrameAssembler.Losses] splits by boundary.
+func (a *FrameAssembler) MissingMarkers() (noStart, noEnd int) {
+	return a.noSOI, a.noEOI
+}
+
 // Feed takes one payload and returns a whole frame's bytes when one completed.
 //
 // ⛔⛔ THE BYTES ARE THE CALLER'S, AND THIS COMMENT USED TO SAY THE OPPOSITE. It
@@ -295,6 +309,30 @@ func (a *FrameAssembler) Feed(p UVCPayload) ([]byte, bool) {
 		a.bad++
 		a.open = false
 		a.buf = a.buf[:0]
+		a.fid = p.FID()
+		return nil, false
+	}
+
+	// ⛔⛔ A PAYLOAD CARRYING NO DATA DOES NOT BEGIN A FRAME, and letting it cost
+	// one phantom dropped frame for every real one. A header-only payload — a
+	// length, the bits, and nothing after them — is how a camera keeps an
+	// isochronous stream alive between frames; it is NOT an empty packet, so the
+	// zero-length skip in the stream never sees it, and it parses perfectly.
+	// Opening a frame on it meant the next identifier toggle completed a buffer
+	// with nothing in it. Measured on a Pixel 11 Pro Fold at 320x240,
+	// 2026-10-18:
+	//
+	//	10 frames, 10 dropped, short by 153600 each of a 153600-byte frame
+	//
+	// Short by exactly a whole frame is a frame that carried NOTHING, and ten of
+	// them for ten real frames is one apiece. The counters said the bus was
+	// losing half the frames; the bus was losing none.
+	//
+	// ⚠ A frame already open still ends here: a header-only payload WITH the
+	// end-of-frame bit is the legitimate way to close a frame whose data has all
+	// arrived, and refusing to act on that would hold every frame until the next
+	// toggle.
+	if len(p.Data) == 0 && !a.open {
 		a.fid = p.FID()
 		return nil, false
 	}
@@ -363,6 +401,18 @@ func (a *FrameAssembler) complete(why endedBy) []byte {
 	if a.kind == FormatMJPEG {
 		if !wholeJPEG(a.buf) {
 			a.dropped++
+			// ⛔ WHICH MARKER IS MISSING IS THE DIAGNOSIS. A buffer with no
+			// start-of-image began mid-picture, which means a boundary fired
+			// where the camera had not finished one; a buffer with a start and
+			// no end lost its tail. They are opposite faults and "dropped"
+			// alone cannot tell them apart — the same reason Losses splits by
+			// boundary.
+			switch {
+			case !bytes.HasPrefix(a.buf, jpegSOI):
+				a.noSOI++
+			default:
+				a.noEOI++
+			}
 			// ⚠ NOTHING IS ADDED TO short. The shortfall of a compressed frame
 			// is unknowable — there is no expected length to subtract from — and
 			// a zero here is honest where a guess would be a number people would

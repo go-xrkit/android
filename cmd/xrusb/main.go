@@ -365,6 +365,11 @@ func stream(ctx context.Context, h *android.USBHandle, neg android.UVCNegotiatio
 		onT, onE := s.Assembler().Losses()
 		say("    the losses ended on: %d toggle(s), %d EOF bit(s) — whichever is the "+
 			"larger is the boundary firing where it should not", onT, onE)
+		if noStart, noEnd := s.Assembler().MissingMarkers(); noStart+noEnd > 0 {
+			say("    the MJPEG losses lacked: %d start-of-image, %d end-of-image — no "+
+				"start means a boundary fired where the camera had not finished a "+
+				"picture, no end means the tail went missing", noStart, noEnd)
+		}
 	}
 	if stopped != nil {
 		say("    STOPPED BY: %v", stopped)
