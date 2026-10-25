@@ -347,9 +347,20 @@ func (s *UVCStream) read() {
 		}
 		if slot == nil {
 			// Nothing has completed. ⚠ THE SLEEP IS THE SCHEDULE, not a guess:
-			// at StreamPacketsPerURB packets a request, each covers four
-			// milliseconds, so there is nothing to collect sooner and a busy
-			// loop would burn a core to learn that.
+			// a high-speed isochronous endpoint carries one packet per
+			// 125 µs microframe, so StreamPacketsPerURB = 8 packets is ONE
+			// millisecond of video a request. There is nothing to collect
+			// sooner, and a busy loop would burn a core to learn that.
+			//
+			// ⛔ IT SAID "four milliseconds" HERE AND IN THE README, which is
+			// the number that made the whole starvation argument add up wrong:
+			// at four, sixteen requests would cover 64 ms rather than the 16
+			// the same paragraph claimed, and the 19 ms MJPEG decode would
+			// have fitted inside the ring instead of overrunning it. The
+			// module's own ISOPacketsPerURB says "8 packets is a millisecond
+			// of video" and the measured 8000 intervals a second says the same;
+			// two of our own numbers disagreed and the wrong one was repeated
+			// four times.
 			select {
 			case <-s.stop:
 				return
