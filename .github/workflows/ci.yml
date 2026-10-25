@@ -243,17 +243,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { goarch: riscv64, qemu: qemu-riscv64-static }
-          - { goarch: loong64, qemu: qemu-loongarch64-static }
-          - { goarch: ppc64le, qemu: qemu-ppc64le-static }
-          - { goarch: s390x,   qemu: qemu-s390x-static }
+          - { goarch: riscv64, qemu: qemu-riscv64 }
+          - { goarch: loong64, qemu: qemu-loongarch64 }
+          - { goarch: ppc64le, qemu: qemu-ppc64le }
+          - { goarch: s390x,   qemu: qemu-s390x }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.2'
       - run: go version
-      - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      # It was `qemu-user-static` and the `-static` binaries until 2026-10-25,
+      # when all four of these lanes went red at once with
+      #
+      #   E: Package 'qemu-user-static' has no installation candidate
+      #
+      # `ubuntu-latest` migrated to Ubuntu 26.04 ("resolute") from 19 October,
+      # and there `qemu-user-static` is a VIRTUAL package provided by
+      # qemu-user-binfmt / qemu-user-binfmt-hwe, with no candidate of its own.
+      #
+      # Measured in a real ubuntu:26.04 image rather than guessed: `qemu-user`
+      # has a candidate (1:10.2.1+ds-1ubuntu3.3) and installs exactly
+      # qemu-riscv64, qemu-loongarch64, qemu-ppc64le and qemu-s390x — and NO
+      # `*-static` binary at all, which is why the matrix names above lost the
+      # suffix too. Changing only the package would have left `-exec` pointing
+      # at four files that do not exist.
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user
       # An emulated architecture runs roughly an order of magnitude slower than
       # the host, so the helper contexts get a budget that matches the machine
       # they are actually running on. Raising the default instead would stop
