@@ -66,6 +66,27 @@ type fakeStream struct {
 
 	// submitErrAfter fails the Nth submit, counting from one; zero never fails.
 	submitErrAfter int
+
+	// lossy makes this fake behave like the bus rather than like a queue.
+	//
+	// ⛔⛔ WITHOUT IT THIS FAKE IS LOSSLESS, AND THAT HIDES THE ONE FAILURE THE
+	// STREAM EXISTS TO AVOID. A real isochronous endpoint is scheduled every
+	// 125 µs microframe whether anybody is listening, so the bytes of a
+	// microframe that no outstanding request covers are simply gone. The
+	// default fake holds its packets until somebody asks, which is a queue —
+	// and a queue cannot reproduce starvation, however slow the consumer is.
+	//
+	// With it, every submitted request covers StreamPacketsPerURB microframes
+	// of schedule starting where the previous one ended, and whatever arrived
+	// in an uncovered gap is discarded and counted in lost.
+	//
+	// ⚠ IT MODELS THE SUBMISSION GAP AND NOTHING ELSE. It says whether OUR side
+	// ever leaves the schedule uncovered; it says nothing about what a camera
+	// chooses to put in a packet. The open question about this camera's MJPEG
+	// tails is not answerable here — see go-xrkit/android#38.
+	lossy    bool
+	busUntil time.Time
+	lost     int
 	// reapErr, when set, is what reapURB answers.
 	reapErr error
 	// reapUnknown makes the next reap name an address no slot owns.
@@ -84,6 +105,9 @@ func (f *fakeStream) install() {
 		if f.submitErrAfter != 0 && f.submits >= f.submitErrAfter {
 			return syscall.ENODEV
 		}
+		if f.lossy {
+			f.cover(time.Now())
+		}
 		f.queue = append(f.queue, slot)
 		return nil
 	}
@@ -91,6 +115,11 @@ func (f *fakeStream) install() {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.reaps++
+		// ⛔ THE SCHEDULE RUNS WHETHER OR NOT ANYTHING IS SUBMITTED, so the
+		// accounting happens here too — see lapse.
+		if f.lossy {
+			f.lapse(time.Now())
+		}
 		if f.reapErr != nil {
 			return 0, f.reapErr
 		}
@@ -121,6 +150,59 @@ func (f *fakeStream) install() {
 		}
 		return nil
 	}
+}
+
+// microframe is the interval a high-speed isochronous endpoint is scheduled on.
+//
+// ⛔ 125 µs, SO StreamPacketsPerURB = 8 PACKETS IS ONE MILLISECOND A REQUEST.
+// This package said "four milliseconds" in four places until 2026-10-25, which
+// made sixteen requests cover 64 ms in one sentence and 16 ms in the next.
+const microframe = 125 * time.Microsecond
+
+// lapse discards whatever the camera sent into schedule that no outstanding
+// request covered, up to now.
+//
+// ⛔⛔ IT IS CALLED FROM BOTH SEAMS, AND THE FIRST VERSION WAS CALLED ONLY FROM
+// submitURB — which made the instrument blind to the worst case it exists to
+// catch. A gap was noticed retroactively, when the next request arrived, so a
+// reader that stopped resubmitting ALTOGETHER produced no submit, hence no
+// gap, hence a clean bill of health. The loss happens whether or not anybody
+// comes back to ask, so it is accounted wherever the fake is touched.
+//
+// Called with the lock held.
+func (f *fakeStream) lapse(now time.Time) {
+	if f.busUntil.IsZero() {
+		f.busUntil = now
+		return
+	}
+	gap := now.Sub(f.busUntil)
+	if gap <= 0 {
+		return
+	}
+	// ⛔ CAPPED BY WHAT THE CAMERA ACTUALLY HAD. Counting a loss for packets
+	// nobody queued would make every idle moment look like a defect, and this
+	// fake has to stay usable for the tests that are not about starvation.
+	n := min(int(gap/microframe), len(f.packets))
+	f.packets = f.packets[n:]
+	f.lost += n
+	f.busUntil = now
+}
+
+// cover extends the covered schedule by one request's worth, queued behind
+// whatever is already outstanding.
+func (f *fakeStream) cover(now time.Time) {
+	f.lapse(now)
+	if f.busUntil.Before(now) {
+		f.busUntil = now
+	}
+	f.busUntil = f.busUntil.Add(StreamPacketsPerURB * microframe)
+}
+
+// lostPackets is how much schedule went uncovered, in packets.
+func (f *fakeStream) lostPackets() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lost
 }
 
 // counts returns the three syscall tallies.
@@ -369,6 +451,64 @@ func TestTwoFramesInOneRequestAreBothDelivered(t *testing.T) {
 		t.Errorf("Stats reports %d frames and two were delivered (%s)", st.Frames, st)
 	}
 }
+
+// ⭐⭐ THE PLANTED POSITIVE FOR THE LOSSY BUS. A test that asserts "nothing was
+// lost" is worth exactly as much as the instrument's ability to see a loss, and
+// this fake was a lossless queue until today — so the invariant below would
+// have passed on an instrument that could not fail.
+//
+// One request covers a millisecond. Submit one, wait four, and three
+// milliseconds of schedule had nothing covering it.
+func TestTheLossyBusLosesTheScheduleNobodyCovered(t *testing.T) {
+	f := &fakeStream{t: t, packet: 3072, lossy: true}
+	f.install()
+	f.sendFrame(false, 0x1, 64*1024, 1024) // plenty for a gap to eat
+
+	if err := submitURB(-1, &urbSlot{}); err != nil {
+		t.Fatalf("the first submit: %v", err)
+	}
+	time.Sleep(4 * time.Millisecond)
+	if err := submitURB(-1, &urbSlot{}); err != nil {
+		t.Fatalf("the second submit: %v", err)
+	}
+
+	// ⚠ THE BOUND IS ONE-SIDED ON PURPOSE. Four milliseconds against a 125 µs
+	// microframe is twenty-four packets of gap, and asserting the exact count
+	// would be asserting the scheduler's punctuality rather than this model's
+	// behaviour. What must hold is that a gap costs something.
+	if lost := f.lostPackets(); lost == 0 {
+		t.Error("four milliseconds passed with nothing submitted and no packet was " +
+			"lost; this fake is still a queue, so no test on it can see starvation")
+	}
+}
+
+// ⛔⛔⛔ AND WHAT THIS FIXTURE STILL CANNOT DO, WRITTEN DOWN BECAUSE I TRIED.
+//
+// The obvious next test is the invariant the decoupled reader exists for: a
+// caller slower than the whole ring must not leave the schedule uncovered. I
+// wrote it, and then checked it the only way worth checking — by breaking the
+// reader and seeing whether it noticed. Twice:
+//
+//	no resubmit at all          -> the test failed by TIMEOUT, not by loss
+//	20 ms between reap, submit  -> the test failed by TIMEOUT, not by loss
+//
+// Both mutations were caught, and neither was caught by the assertion I had
+// written. The loss counter never fired, and the reason is structural: in this
+// fake a slot sits in the queue, outstanding, until somebody reaps it. A real
+// request COMPLETES on the schedule and stops collecting whether or not anybody
+// comes for it, and that completion is the whole mechanism — 16 requests cover
+// 16 ms, the old decode took 19, and the three milliseconds after the last
+// completion had nothing outstanding. A fake with no notion of completion
+// cannot tell the old coupling from the new reader, however slow the consumer
+// is made.
+//
+// So the test is NOT here. An assertion whose premise cannot hold passes for
+// the wrong reason, and this one would have read as proof that v0.17.0 fixed
+// the starvation. What would earn that proof is a TIME-DRIVEN fake: slots that
+// complete on a clock, and packets generated on the schedule rather than queued
+// in advance. That is a bigger fixture than this change, and the question it
+// serves — whether this camera's missing MJPEG tails were our starvation or its
+// own truncation — needs the device anyway. go-xrkit/android#38.
 
 func TestACallerSlowerThanTheCameraLosesTheOldestFrames(t *testing.T) {
 	// A queue without a ceiling grows without bound behind a slow caller. The

@@ -985,12 +985,24 @@ into an `*image.RGBA` — which is what `headflow` takes.
 ⛔ **Sixteen in flight is not a tuning choice, and neither was the 4 it replaced.**
 An isochronous endpoint is scheduled every microframe whether anybody is
 listening: between reaping one request and submitting the next, the camera's
-packets go nowhere. At `StreamPacketsPerURB` = 8 packets a request each covers
-four milliseconds, so the ring covers 16 ms of schedule. Four covered 4 ms, and
-that was the frame rate's ceiling for five releases — see *The ring was the
-ceiling* below. Thirty-two, on either axis, makes this camera stop sending
-altogether, which is why the next move was structural rather than another
-doubling.
+packets go nowhere. A high-speed isochronous endpoint carries one packet per
+**125 µs microframe**, so `StreamPacketsPerURB` = 8 packets is **one
+millisecond** of video a request: sixteen in flight cover **16 ms** of schedule,
+and the four this shipped with for five releases covered **4 ms**. That was the
+frame rate's ceiling — see *The ring was the ceiling* below. Thirty-two, on
+either axis, makes this camera stop sending altogether, which is why the next
+move was structural rather than another doubling.
+
+⛔ **This paragraph said "each covers four milliseconds" until 2026-10-25, and
+that number contradicted the two beside it.** At four, sixteen requests would
+cover 64 ms rather than the 16 ms the same sentence claimed — and the 19 ms
+MJPEG decode would have fitted *inside* the ring instead of overrunning it,
+which is the step the starvation argument below turns on. Two of this
+repository's own measurements already said one millisecond: `ISOPacketsPerURB`
+("8 packets is a millisecond of video") and the byte budget's **8000 intervals a
+second**. The wrong figure was repeated in four places and the conclusions that
+rest on it survive unchanged, which is luck rather than rigour: an argument whose
+arithmetic does not close is not an argument.
 
 ⛔⛔ **The reaping is a goroutine, and the decode is NOT in it.** `Frame` used to
 reap, assemble *and* decode in turn, so every millisecond of decoding was a
@@ -1165,6 +1177,34 @@ above), which removes that explanation's mechanism. The run that would settle it
 has not been taken: a rate for MJPEG with a decoupled reader is **not measured
 here**, and until it is, neither "the camera truncates" nor "it was our
 starvation" is the fleet's position.
+
+⛔⛔ **And it cannot be settled in a test here either, which was tried on
+2026-10-25.** The suite's fake bus can now lose the schedule nobody covered — a
+request covers eight microframes, and whatever arrives in an uncovered gap is
+discarded and counted — so the obvious move was to assert that a caller slower
+than the whole ring never causes a loss. That assertion was written, and then
+checked the only way worth checking: by **breaking the reader** and seeing
+whether it noticed.
+
+| the reader was broken by | the test failed by |
+| --- | --- |
+| never resubmitting at all | **timeout** |
+| sleeping 20 ms between the reap and the resubmit — the old coupling exactly | **timeout** |
+
+Both mutations were caught and **neither was caught by the assertion**. The loss
+counter never fired, for a structural reason: in that fake a request sits
+outstanding until somebody reaps it, while a real request **completes on the
+schedule** and stops collecting whether anybody comes for it or not. That
+completion *is* the mechanism — sixteen requests cover 16 ms, the decode took
+19, and the last three milliseconds had nothing outstanding. A fake with no
+notion of completion cannot tell the old coupling from the new reader.
+
+So the test is **not** in the suite. An assertion whose premise cannot hold
+passes for the wrong reason, and this one would have read as proof that v0.17.0
+fixed the starvation. Earning that proof needs a **time-driven** fake: slots
+that complete on a clock and packets generated on the schedule rather than
+queued in advance. The lossy bus and its planted positive are in the suite as
+the first half of it.
 
 ⭐ **The decode figures are now the phone's**, and they are 3.5–10× the
 workstation's: 19.84 ms for MJPEG is **60 % of a 30 fps interval** where the Mac
