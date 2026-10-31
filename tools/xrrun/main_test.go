@@ -277,6 +277,49 @@ func TestEveryProbeInThisRepositoryHasATranscript(t *testing.T) {
 	}
 }
 
+// ⛔⛔⛔ EVERY PROBE THAT OPENS THE CAMERA MUST BE IN `needs`, and this test is
+// the only thing that will say so. Leaving one out costs forty seconds of
+// build-install-run and then a message that blames the user:
+//
+//	the permission broadcast for /dev/bus/usb/001/007 came back not granted
+//
+// one millisecond after the request, because
+// UsbUserPermissionManager.hasPermission short-circuits on CAMERA for any
+// device with video capture, before it looks at the USB grant at all.
+func TestEveryCameraProbeDeclaresTheCameraPermission(t *testing.T) {
+	for _, probe := range []string{"xrusb", "xrhead", "xrcam"} {
+		if !slices.Contains(needs[probe], "android.permission.CAMERA") {
+			t.Errorf("%s opens the headset's camera and does not ask for CAMERA; the "+
+				"platform will refuse it in a millisecond and blame the user", probe)
+		}
+	}
+	// And a probe that does not touch the camera must not be granted it: a test
+	// harness that hands out permissions nobody needs is a bad habit on a real
+	// person's phone.
+	for _, probe := range []string{"xrscreen", "xrglasses"} {
+		if len(needs[probe]) != 0 {
+			t.Errorf("%s needs %v, which it has no business holding", probe, needs[probe])
+		}
+	}
+}
+
+// The two sources — the table and -perms — are merged once, without duplicates,
+// because the manifest and the grants must be given the same list.
+func TestTheTableAndTheFlagAreMergedOnce(t *testing.T) {
+	got := permissions("xrusb", "android.permission.CAMERA android.permission.RECORD_AUDIO")
+	want := []string{"android.permission.CAMERA", "android.permission.RECORD_AUDIO"}
+	if !slices.Equal(got, want) {
+		t.Errorf("permissions = %v, want %v with CAMERA once", got, want)
+	}
+	if got := permissions("xrscreen", ""); len(got) != 0 {
+		t.Errorf("permissions for a probe that needs none = %v", got)
+	}
+	if got := permissions("xrhead", ""); !slices.Equal(got,
+		[]string{"android.permission.CAMERA"}) {
+		t.Errorf("permissions without the flag = %v; the table alone must be enough", got)
+	}
+}
+
 func TestFirstLinesStopsWhereItIsAsked(t *testing.T) {
 	// A crash dump is hundreds of lines and the first few name the cause; the
 	// rest is the platform's own stack.

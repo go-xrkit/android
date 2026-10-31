@@ -68,6 +68,47 @@ var transcripts = map[string]string{
 	"xrglasses": "glasses.txt",
 }
 
+// needs maps a probe to the permissions it cannot work without, so that
+// forgetting one is not possible rather than merely unlikely.
+//
+// ⛔⛔⛔ THIS TABLE EXISTS BECAUSE ITS ABSENCE COST TWO WEEKS. Every probe that
+// opens the headset's camera needs CAMERA — not for an Android camera API,
+// which this package never calls, but because
+// UsbUserPermissionManager.hasPermission SHORT-CIRCUITS on it: for a device
+// whose getHasVideoCapture() is true it returns false unless the package holds
+// CAMERA, before it looks at the USB grant at all. So the USB permission is
+// irrelevant without it, and the platform does not even show its dialog.
+//
+// ⛔ AND THE FAILURE IT CAUSES POINTS SOMEWHERE ELSE. What the operator sees,
+// forty seconds into a build-install-run, is
+//
+//	the permission broadcast for /dev/bus/usb/001/007 came back not granted
+//
+// arriving one millisecond after the request — which reads as the user
+// refusing, and sent four sessions looking at activity lifecycles, pending
+// intents and foreground state. The README's own example passed
+// `-perms android.permission.CAMERA` all along; the flag was the documentation
+// of a requirement instead of the enforcement of one.
+var needs = map[string][]string{
+	"xrusb":  {"android.permission.CAMERA"},
+	"xrhead": {"android.permission.CAMERA"},
+	"xrcam":  {"android.permission.CAMERA"},
+}
+
+// permissions is what the APK must declare and be granted for this probe: what
+// the probe needs, plus whatever -perms adds, each once.
+func permissions(probe, extra string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range append(needs[probe], strings.Fields(extra)...) {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "xrrun:", err)
@@ -119,6 +160,13 @@ func run(ctx context.Context, argv []string) error {
 		return fmt.Errorf("%s writes no transcript this tool knows; add it to the table "+
 			"in tools/xrrun rather than guessing a name", name)
 	}
+	// What this probe needs, whether or not anybody remembered to ask for it.
+	// Printed, because a permission granted silently is one nobody can audit.
+	grants := permissions(name, o.perms)
+	if added := len(grants) - len(strings.Fields(o.perms)); added > 0 {
+		fmt.Printf("==> %s needs %s; declaring and granting it\n",
+			name, strings.Join(needs[name], " "))
+	}
 	if o.device == "" {
 		d, err := soleDevice(ctx)
 		if err != nil {
@@ -147,13 +195,11 @@ func run(ctx context.Context, argv []string) error {
 			return err
 		}
 	}
-	if o.perms != "" {
-		for _, p := range strings.Fields(o.perms) {
-			// A permission the manifest declares still has to be granted; a
-			// dangerous one is never granted by installing.
-			if _, err := adb(ctx, o.device, "shell", "pm", "grant", pkg, p); err != nil {
-				return fmt.Errorf("granting %s: %w", p, err)
-			}
+	for _, p := range grants {
+		// A permission the manifest declares still has to be granted; a
+		// dangerous one is never granted by installing.
+		if _, err := adb(ctx, o.device, "shell", "pm", "grant", pkg, p); err != nil {
+			return fmt.Errorf("granting %s: %w", p, err)
 		}
 	}
 
@@ -590,8 +636,11 @@ func soleDevice(ctx context.Context) (string, error) {
 // decisions in it.
 func build(ctx context.Context, o options) error {
 	env := append(os.Environ(), "APP="+o.app, "GOWORK=off")
-	if o.perms != "" {
-		env = append(env, "PERMISSIONS="+o.perms)
+	// ⛔ THE MANIFEST GETS THE SAME LIST THE GRANTS DO. Declaring and granting
+	// from two different sources is how a probe ends up granted a permission
+	// its manifest never asked for, which `pm grant` rejects by name.
+	if ps := permissions(filepath.Base(o.app), o.perms); len(ps) > 0 {
+		env = append(env, "PERMISSIONS="+strings.Join(ps, " "))
 	}
 	// ⛔ FIND THE TOOL CHAIN RATHER THAN DEMANDING IT. build.sh refuses without
 	// ANDROID_HOME and JAVA_HOME, and a tool that needs two exports before it
