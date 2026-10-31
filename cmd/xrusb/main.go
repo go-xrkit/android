@@ -184,6 +184,7 @@ func run(ctx context.Context, args []string) int {
 	// control transfers: the device agreeing to produce bytes, which is a
 	// separate question from the kernel agreeing to carry them.
 	say("")
+	reportExposureControls(h, desc, say)
 	formats, ferr := desc.UVCFormats(iface.Number)
 	if ferr != nil {
 		say("STEP 5 formats               FAILED: %v", ferr)
@@ -476,6 +477,96 @@ func stream(ctx context.Context, h *android.USBHandle, neg android.UVCNegotiatio
 		"go-xrkit/xrkit/headflow, which takes an *image.RGBA and is what Decode "+
 		"produces.", hi-lo)
 	return 0
+}
+
+// UVC camera-terminal constants, from the kernel's own
+// include/uapi/linux/usb/video.h rather than from memory.
+const (
+	uvcCSInterface   = 0x24   // bDescriptorType for a class-specific interface
+	uvcVCInputTerm   = 0x02   // bDescriptorSubType: VC_INPUT_TERMINAL
+	uvcITTCamera     = 0x0201 // wTerminalType: ITT_CAMERA
+	uvcGetInfo       = 0x86   // UVC_GET_INFO
+	uvcGetMin        = 0x82   // UVC_GET_MIN
+	uvcGetCurReq     = 0x81   // UVC_GET_CUR
+	uvcCTAEMode      = 0x02   // UVC_CT_AE_MODE_CONTROL
+	uvcCTExposureAbs = 0x04   // UVC_CT_EXPOSURE_TIME_ABSOLUTE_CONTROL
+)
+
+// reportExposureControls asks the camera whether its exposure can be driven
+// from here, and says what it answers.
+//
+// ⛔⛔ IT EXISTS TO SETTLE A QUESTION THE SCENE COULD NOT. This camera delivers
+// ~781 bytes an interval of the 2400 it reserves, which is 10 fps of a format it
+// advertises at 25, and the obvious explanation is auto-exposure lengthening its
+// integration time in a dark room. Testing that by brightening the room needs a
+// person and a uniformly lit wall, and the first attempt — a lamp in the dark —
+// moved the luminance MAXIMUM and not its mean, so it concluded nothing.
+//
+// Driving the exposure from here needs nobody and changes one thing. This step
+// is the half that can be done without consent from the camera: ask.
+//
+// ⚠ IT ONLY ASKS. GET_INFO's bit 1 says whether SET_CUR is supported at all, and
+// a camera that says no ends the idea cheaply — which is the point of asking
+// before building the setter.
+func reportExposureControls(h *android.USBHandle, desc android.USBDescriptors,
+	say func(string, ...any)) {
+	// The camera terminal names itself in the VideoControl interface's
+	// class-specific descriptors; its bTerminalID is the entity to address.
+	var terminal int
+	err := desc.Walk(func(typ int, b []byte) bool {
+		if typ != uvcCSInterface || len(b) < 8 || b[2] != uvcVCInputTerm {
+			return true
+		}
+		if int(b[4])|int(b[5])<<8 == uvcITTCamera {
+			terminal = int(b[3])
+			return false
+		}
+		return true
+	})
+	if err != nil || terminal == 0 {
+		say("STEP 4b exposure controls    no camera terminal in the descriptors (%v)", err)
+		return
+	}
+
+	// wValue is the selector in the high byte; wIndex is the entity in the high
+	// byte and the VideoControl interface in the low one.
+	const vcInterface = 0
+	ask := func(selector int, what string) {
+		var info [1]byte
+		wValue := uint16(selector) << 8
+		wIndex := uint16(terminal)<<8 | vcInterface
+		if _, err := h.Control(android.ControlIn(), uvcGetInfo, wValue, wIndex, info[:]); err != nil {
+			say("STEP 4b %-20s GET_INFO refused: %v", what, err)
+			return
+		}
+		get, set := info[0]&1 != 0, info[0]&2 != 0
+		var cur, lo [4]byte
+		curOK := false
+		if get {
+			if _, err := h.Control(android.ControlIn(), uvcGetCurReq, wValue, wIndex, cur[:]); err == nil {
+				curOK = true
+			}
+		}
+		_, minErr := h.Control(android.ControlIn(), uvcGetMin, wValue, wIndex, lo[:])
+		say("STEP 4b %-20s info=%#02x get=%v set=%v cur=%v min=%v",
+			what, info[0], get, set, fmtLE(cur[:], curOK), fmtLE(lo[:], minErr == nil))
+	}
+	say("STEP 4b camera terminal      entity %d, asking what its exposure allows",
+		terminal)
+	ask(uvcCTAEMode, "AE mode")
+	ask(uvcCTExposureAbs, "exposure absolute")
+}
+
+// fmtLE renders a little-endian value, or says it was not readable.
+func fmtLE(b []byte, ok bool) string {
+	if !ok {
+		return "unreadable"
+	}
+	var v uint32
+	for i := len(b) - 1; i >= 0; i-- {
+		v = v<<8 | uint32(b[i])
+	}
+	return fmt.Sprintf("%d", v)
 }
 
 // sayDebt reports what claiming the camera took from the rest of the phone.
