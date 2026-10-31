@@ -243,37 +243,61 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { goarch: riscv64, qemu: qemu-riscv64 }
-          - { goarch: loong64, qemu: qemu-loongarch64 }
-          - { goarch: ppc64le, qemu: qemu-ppc64le }
-          - { goarch: s390x,   qemu: qemu-s390x }
+          - { goarch: riscv64, qemu: qemu-riscv64-static }
+          - { goarch: loong64, qemu: qemu-loongarch64-static }
+          - { goarch: ppc64le, qemu: qemu-ppc64le-static }
+          - { goarch: s390x,   qemu: qemu-s390x-static }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.2'
       - run: go version
-      # It was `qemu-user-static` and the `-static` binaries until 2026-10-25,
-      # when all four of these lanes went red at once with
+      # ⛔ `qemu-user-static` is a VIRTUAL package on Ubuntu 26.04, which
+      # `ubuntu-latest` became on 2026-10-19, and apt refuses to choose between its
+      # two providers:
       #
       #   E: Package 'qemu-user-static' has no installation candidate
       #
-      # `ubuntu-latest` migrated to Ubuntu 26.04 ("resolute") from 19 October,
-      # and there `qemu-user-static` is a VIRTUAL package provided by
-      # qemu-user-binfmt / qemu-user-binfmt-hwe, with no candidate of its own.
+      # ⚠ Installing a provider is NOT the fix: `qemu-user-binfmt` registers binfmt
+      # handlers, it does not ship the `qemu-<arch>-static` binaries this lane
+      # invokes. `qemu-user` ships the dynamic `qemu-<arch>`, which is all that
+      # `go test -exec` needs, so both are installed and BOTH NAMES are accepted
+      # below.
       #
-      # Measured in a real ubuntu:26.04 image rather than guessed: `qemu-user`
-      # has a candidate (1:10.2.1+ds-1ubuntu3.3) and installs exactly
-      # qemu-riscv64, qemu-loongarch64, qemu-ppc64le and qemu-s390x — and NO
-      # `*-static` binary at all, which is why the matrix names above lost the
-      # suffix too. Changing only the package would have left `-exec` pointing
-      # at four files that do not exist.
-      - run: sudo apt-get update && sudo apt-get install -y qemu-user
+      # ⛔⛔ THIS IS THE FLEET'S SHAPE, not a local one. The first fix here
+      # installed `qemu-user` alone and renamed the matrix to the non-static
+      # binaries: it works, and `go-fleettools/.../qemufix` REFUSES it, because it
+      # has neither of the two properties below. A lane that is merely green is
+      # not the same as a lane that says what it ran. `qemufix` could not rewrite
+      # this step either — it carries an `env:` after its `run:`, and the tool
+      # refuses to swallow a key rather than guess — so the shape is matched by
+      # hand, against go-xrkit/xrkit's lane.
+      - name: install qemu user-mode emulators
+        timeout-minutes: 10
+        run: sudo apt-get update && sudo apt-get install -y qemu-user qemu-user-binfmt
       # An emulated architecture runs roughly an order of magnitude slower than
       # the host, so the helper contexts get a budget that matches the machine
       # they are actually running on. Raising the default instead would stop
       # the suite catching a real hang everywhere else.
       - name: Test under qemu (${{ matrix.goarch }})
-        run: CGO_ENABLED=0 GOARCH=${{ matrix.goarch }} go test -exec=${{ matrix.qemu }} ./...
+        run: |
+          base="${{ matrix.qemu }}"
+          q=""
+          for cand in "$base" "${base%-static}"; do
+            command -v "$cand" >/dev/null 2>&1 && q="$cand" && break
+          done
+          # ⛔ A missing emulator FAILS this lane. A lane that reports success for
+          # an architecture it never ran is the one outcome this matrix exists to
+          # rule out — and the package rename of 2026-10-19 is exactly how an
+          # emulator disappears without anybody deciding to remove it.
+          if [ -z "$q" ]; then
+            echo "::error::no qemu user emulator for ${{ matrix.goarch }} (looked for $base and ${base%-static})"
+            exit 1
+          fi
+          # Printed on purpose: without it, "ran under emulation" and "skipped" are
+          # indistinguishable from a green tick.
+          echo "running ${{ matrix.goarch }} under $q"
+          CGO_ENABLED=0 GOARCH=${{ matrix.goarch }} go test -exec="$q" ./...
         env:
           XRKIT_TEST_BUDGET: 120s
