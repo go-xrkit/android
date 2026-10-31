@@ -1776,7 +1776,7 @@ lifts the restriction is a red build rather than a silent one.
 ## Running a probe on a device
 
 ```sh
-go run ./tools/xrrun -app ./cmd/xrusb -args '-wait 30s' -perms android.permission.CAMERA
+go run ./tools/xrrun -app ./cmd/xrusb -args '-wait 30s'
 ```
 
 That is one command for what used to be seven, and it is in Go because **the
@@ -1790,6 +1790,35 @@ It waits for the **transcript file** rather than for a duration, notices a
 **crash** instead of timing out on one, refuses to choose when two devices are
 listed — wireless `adb` lists the same phone twice — and finds the SDK and JDK
 itself rather than demanding two exports.
+
+⛔⛔⛔ **And it knows which permissions a probe cannot work without, because the
+flag that used to carry them cost two weeks.** That command used to end in
+`-perms android.permission.CAMERA`, and leaving it off did not fail where you
+could see it: forty seconds later the run reported
+
+```
+the permission broadcast for /dev/bus/usb/001/007 came back not granted
+```
+
+one millisecond after asking — which reads as *the user refusing*, and sent four
+sessions looking at activity lifecycles, pending intents and foreground state.
+The cause is that `UsbUserPermissionManager.hasPermission` **short-circuits on
+CAMERA** for any device whose `getHasVideoCapture()` is true, before it consults
+the USB grant at all, so no USB dialog can fix it and the platform shows none.
+
+So `xrrun` carries a table — `xrusb`, `xrhead` and `xrcam` need `CAMERA` — and
+declares *and* grants it, printing the line so a permission is never handed out
+invisibly:
+
+```
+==> xrusb needs android.permission.CAMERA; declaring and granting it
+```
+
+A test asserts both halves: that every camera probe is in the table, and that
+`xrscreen` and `xrglasses` are **not** — a harness that hands out permissions
+nobody needs is a bad habit on a real person's phone. `-perms` still works and
+is merged with the table, once, so the manifest and the grants are given the
+same list.
 
 ⛔ **And it asks whether the phone can run anything at all, before it builds.**
 Behind the lock screen Android does not credit the application as foreground,
