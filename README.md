@@ -1170,19 +1170,36 @@ of UVC header — so nothing is missing and nothing is ours: the camera emitted
 ten frames in a second. The afternoon of 18 October it must have emitted
 ~1 830 bytes an interval to deliver 23.8.
 
-⚠ **It is NOT the light**, which was the obvious guess and is refuted: a run at
-luminance `4..86` and one at `37..255` returned **the same byte and packet
-totals** (6 239 904 / 7 992). YUY2 frames are a fixed size, so its byte rate
-*is* its frame rate — and that rate did not move when the scene brightened by a
-factor of three.
-
 **So 23.8 fps is a figure of that evening's camera state, not a property of this
 device, and the sentence that presented it as "the" rate was wrong.** What
 `StreamURBs = 16` is justified by survives: it removes the dropped frames in
-both regimes. What is unexplained is why the same camera, identically
-negotiated, gives 1 830 bytes an interval one day and 781 another — the glasses
-were being **worn** for the 18 October runs and were on a desk for these, which
-is the next variable to try and was not controlled either time.
+both regimes.
+
+### What has been eliminated, and what is left
+
+Why the same camera, identically negotiated, gives ~1 830 bytes an interval one
+day and 781 another is **unexplained** — but four candidates are now ruled out,
+each by a measurement rather than by argument:
+
+| candidate | how it died |
+|---|---|
+| **the light** | the scene's **mean** luminance went 22.9 → **47.7** of 255 — a true doubling, not a saturated maximum — and the byte and packet totals did not move (6 239 904 / 7 992 against 6 239 808 / 7 992) |
+| the glasses' **display** being active | `dumpsys display` shows the Beast `state ON` on both evenings |
+| the camera's state after being **taken from `uvcvideo`** | measured immediately after a replug, on a freshly bound device: the same signature |
+| `-width 640` forced vs the **default** pick | identical negotiation — `YUY2 640×480 @25fps`, payload 2400, alternate 5 |
+
+⛔⛔ **The light was refuted TWICE, and the first time did not count.** The first
+attempt pointed the glasses at a lamp in a dark room: luminance went `4..86` →
+`37..255` and the bytes did not move, which was published as settled. It was
+not — **a lamp saturates the MAXIMUM and barely moves the mean**, and
+auto-exposure integrates over the mean. The probe only reported a range, so the
+experiment could not tell the two apart and *looked* conclusive. It reports the
+mean now, and the doubling above is what a real refutation needed.
+
+**What is left**: the glasses were being **worn** for the 18 October runs and sat
+on a desk for all of these — uncontrolled both times, and the next thing to try.
+Beyond that, nothing is named: temperature, firmware state, the hub, and the
+phone's USB power budget are all unexamined.
 
 ⚠ **The experiment that misled me was right about its own conditions.** "Sixteen
 requests changed nothing" was measured with a consumer costing 0.3 ms, where a
