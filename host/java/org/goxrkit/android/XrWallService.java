@@ -609,6 +609,11 @@ public final class XrWallService extends Service {
             }
             Log.i(TAG, "openDevice refused " + name + " outright; asking for permission");
 
+            // ⛔ WHEN WE ASKED, so the answer can be TIMED. An answer that comes
+            // back faster than a person can read the dialog was not a decision,
+            // and that is the difference the message below turns on.
+            final long askedAt = android.os.SystemClock.uptimeMillis();
+
             // The answer comes back as a broadcast. The receiver unregisters
             // itself: a connection that asked twice would otherwise leave one
             // behind per attempt, and the second answer would be delivered to
@@ -633,10 +638,35 @@ public final class XrWallService extends Service {
                     }
                     if (!i.getBooleanExtra(
                             android.hardware.usb.UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                        // ⛔⛔⛔ A REFUSAL THIS FAST WAS NEVER PUT TO ANYBODY, AND THE
+                        // USUAL CAUSE IS THE CAMERA PERMISSION. Measured on a Pixel 11
+                        // Pro Fold, 2026-10-31: the broadcast came back one
+                        // millisecond after requestPermission, from a resumed and
+                        // drawn Activity, while `dumpsys usb` showed the USB grant
+                        // for this very uid and device:
+                        //
+                        //   device_permissions={ device_name=/dev/bus/usb/001/007
+                        //                        uids=10350 }
+                        //
+                        // AOSP says why, in UsbUserPermissionManager.hasPermission:
+                        // for a device whose getHasVideoCapture() is true, it returns
+                        // FALSE unless the calling package holds CAMERA and the camera
+                        // privacy toggle is off -- before it ever consults the USB
+                        // records. So no USB dialog can fix it, and the platform does
+                        // not bother showing one. A UVC camera is exactly such a
+                        // device.
+                        long waited = android.os.SystemClock.uptimeMillis() - askedAt;
                         error(CODE_USB_PERMISSION_DENIED, "requestPermission",
                                 "the permission broadcast for " + name + " came back not "
-                                        + "granted -- which is the user refusing, OR the "
-                                        + "request never reaching anybody");
+                                        + "granted after " + waited + "ms"
+                                        + (waited < 500
+                                                ? " -- too fast for anybody to have decided, so"
+                                                        + " NOBODY WAS ASKED. For a camera this"
+                                                        + " is usually the CAMERA permission"
+                                                        + " missing: the APK must declare it and"
+                                                        + " it must be granted (xrrun -perms"
+                                                        + " android.permission.CAMERA)"
+                                                : " -- long enough to be a person refusing"));
                         return;
                     }
                     handler.post(() -> lendUsbDevice(um, dev));
