@@ -1146,6 +1146,44 @@ and 10 drops to **14.8 fps and none** — measured over 10 frames, which include
 the start-up wait, so its *sustained* rate is **not** measured and the "flat
 across pixel count" claim is withdrawn rather than replaced.
 
+### ⛔⛔⛔ 23.8 fps DID NOT REPRODUCE on 2026-10-31, and the sweep above still holds
+
+Four runs on the same phone, the same glasses and the same commit, in the
+configuration that produced the 23.8 above — default pick, `YUY2 640×480 @25fps`,
+payload **2400**, alternate **5**, `StreamURBs = 16`:
+
+| | fps | dropped | late |
+|---|---|---|---|
+| forced `-width 640` | 9.97 | 0 | 0 |
+| repeat | 10.0 | 0 | 0 |
+| facing a bright light | 9.98 | 0 | 0 |
+| default pick (what the sweep used) | 10.0 | 0 | 0 |
+
+And the ring sweep, repeated the same evening: **4 → 8.91 fps and 2 dropped;
+16 → 10.0 and none.** So the *shape* of the sweep is reproducible — a deeper
+ring still removes the drops — while the *absolute* rate is less than half.
+
+⛔ **What differs is the camera's own byte rate, for an identical negotiation.**
+6 239 904 bytes in 7 992 packets is **781 bytes an interval** of the 2400 it
+reserved, and the total is exactly ten 614 400-byte frames plus 7 992 × 12 bytes
+of UVC header — so nothing is missing and nothing is ours: the camera emitted
+ten frames in a second. The afternoon of 18 October it must have emitted
+~1 830 bytes an interval to deliver 23.8.
+
+⚠ **It is NOT the light**, which was the obvious guess and is refuted: a run at
+luminance `4..86` and one at `37..255` returned **the same byte and packet
+totals** (6 239 904 / 7 992). YUY2 frames are a fixed size, so its byte rate
+*is* its frame rate — and that rate did not move when the scene brightened by a
+factor of three.
+
+**So 23.8 fps is a figure of that evening's camera state, not a property of this
+device, and the sentence that presented it as "the" rate was wrong.** What
+`StreamURBs = 16` is justified by survives: it removes the dropped frames in
+both regimes. What is unexplained is why the same camera, identically
+negotiated, gives 1 830 bytes an interval one day and 781 another — the glasses
+were being **worn** for the 18 October runs and were on a desk for these, which
+is the next variable to try and was not controlled either time.
+
 ⚠ **The experiment that misled me was right about its own conditions.** "Sixteen
 requests changed nothing" was measured with a consumer costing 0.3 ms, where a
 four-millisecond ring is ample. Ring depth matters exactly when the consumer
@@ -1173,10 +1211,32 @@ cause is **not established**; mistaking a location for a cause is the same error
 this section already records twice.
 
 The decode has since moved off the reaping path entirely (see *The stream*
-above), which removes that explanation's mechanism. The run that would settle it
-has not been taken: a rate for MJPEG with a decoupled reader is **not measured
-here**, and until it is, neither "the camera truncates" nor "it was our
-starvation" is the fleet's position.
+above), and two runs were taken on **2026-10-31**, twenty minutes apart, same
+commit, same glasses, same forced `MJPEG 640×480` (payload **800**, alternate 3):
+
+| | fps | dropped | late | packets | packets/s |
+|---|---|---|---|---|---|
+| first | **3.44** | 32 | **0** | 23 272 in 2.91 s | ≈8 000 |
+| second | **1.71** | 80 | **0** | 46 824 in 5.85 s | ≈8 001 |
+
+**Every loss in both runs lacked its end-of-image and none lacked a start**
+(32 and 80 respectively): the camera opened 90 pictures and finished 10.
+
+⭐⭐ **Three numbers exclude OUR starvation, without comparing the runs to
+anything.** `0 late` in both says the handover never shed a frame, so the caller
+was never behind. ≈8 000 packets a second is **one per microframe** — the
+isochronous schedule was *fully claimed*, so nothing could be lost for want of a
+request in flight. And 3 288 392 bytes over 46 824 packets is **70 bytes an
+interval of the 800 the camera reserved**: it is not that we failed to collect
+what it sent, it is that it sent almost nothing. Whatever drops the tails is on
+the far side of the bus.
+
+⚠ **No rate comparison is offered, and the earlier one is withdrawn.** "3.21 →
+3.44, so the decoupling bought nothing" was a delta across two evenings — and
+these two runs, twenty minutes apart, differ by a **factor of two** on their
+own. On this camera a rate delta measures the camera's state, not the code; only
+the within-run invariants above are worth anything. The YUY2 control of the same
+night (above) shows the same instability from the other side.
 
 ⛔⛔ **And it cannot be settled in a test here either, which was tried on
 2026-10-25.** The suite's fake bus can now lose the schedule nobody covered — a
