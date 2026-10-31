@@ -338,6 +338,19 @@ func stream(ctx context.Context, h *android.USBHandle, neg android.UVCNegotiatio
 
 	start := time.Now()
 	var lo, hi byte = 255, 0
+	// ⛔⛔ THE MEAN, BECAUSE A RANGE CANNOT ANSWER "IS THE SCENE BRIGHT?". On
+	// 2026-10-31 this probe was used to test whether ambient light explains the
+	// camera's frame rate: pointed into a dark room it reported luminance
+	// 4..86, pointed at a lamp 37..255 — and the byte and packet totals were
+	// IDENTICAL, which was published as "not the light".
+	//
+	// That conclusion was weaker than it read. A lamp in a dark room saturates
+	// the MAXIMUM and barely moves the mean, and auto-exposure integrates over
+	// the mean. So the two runs may have been the same scene as far as the
+	// sensor was concerned, and the range could not say. The sum is one
+	// addition a pixel and makes the next light test answerable.
+	var sum uint64
+	var samples uint64
 	got := 0
 	// ⛔⛔ THE ERROR IS KEPT, BECAUSE A break THAT DROPS IT COST A MEASUREMENT.
 	// The first run of this step reported "0 frame(s) in 0s — 0 packets" and the
@@ -359,6 +372,8 @@ func stream(ctx context.Context, h *android.USBHandle, neg android.UVCNegotiatio
 		for x := 0; x < size.Width; x++ {
 			l := row[x*4]
 			lo, hi = min(lo, l), max(hi, l)
+			sum += uint64(l)
+			samples++
 		}
 		if got <= keep {
 			// ⛔ WRITTEN HERE AND NOT COLLECTED FIRST. Holding ten 640x480
@@ -432,8 +447,15 @@ func stream(ctx context.Context, h *android.USBHandle, neg android.UVCNegotiatio
 			"the assembly is wrong.")
 		return 1
 	}
-	say("ANSWER %d WHOLE FRAMES at %.3g fps, luminance %d..%d",
-		got, float64(got)/elapsed.Seconds(), lo, hi)
+	// ⚠ THE MEAN IS WHAT AUTO-EXPOSURE SEES, and the range is what a tracker
+	// needs; both are printed because they answer different questions and were
+	// confused for each other once — see the note at `sum`.
+	mean := 0.0
+	if samples > 0 {
+		mean = float64(sum) / float64(samples)
+	}
+	say("ANSWER %d WHOLE FRAMES at %.3g fps, luminance %d..%d, mean %.1f",
+		got, float64(got)/elapsed.Seconds(), lo, hi, mean)
 	if st.Late > 0 {
 		// ⭐ LATE IS OURS AND DROPPED IS THE BUS'S, which is why they are
 		// counted apart: the fixes are opposite. A late frame says this loop is
