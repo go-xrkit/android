@@ -1278,6 +1278,15 @@ answers it: choosing which screen somebody faces is comfortable at 107 ms, and
 but it is twice as close as the shipped default was, and the gap is now the
 camera's 25 fps rather than anything in this code.
 
+⛔⛔ **AND THAT VERDICT MOVES WITH THE RATE, WHICH DID NOT REPRODUCE.** At the
+10.0 fps measured five times on 2026-10-31 the interval is **100 ms**, which is
+not comfortably inside the 107 ms budget — it is *at* its edge, with the
+tracker's own 4.8 ms on top. So on an evening like that one, *choosing which
+screen somebody faces* is only just within reach, and the 1:1 lock is **five
+times** away rather than twice. Nothing in this code changed between the two
+evenings; what the product can promise did. The arithmetic is kept in both
+regimes rather than averaged, because a mean of two regimes describes neither.
+
 ### ⭐⭐⭐ And a real head turn, measured end to end
 
 2026-10-18, the Beast worn and plugged into the phone, a left-right sweep. 30
@@ -2115,7 +2124,10 @@ Deliberate, and stated rather than hidden:
   end-of-image, which locates them without naming a cause, and an earlier entry
   here read that location as "the camera truncates its own frames". That reading
   is withdrawn. Enough for choosing which screen somebody faces,
-  which `headflow` puts at 107 ms against this 42; still short of locking a
+  which `headflow` puts at 107 ms against this 42 — **but the 23.8 fps behind
+  that 42 did not reproduce on 2026-10-31**: five runs gave 10.0, whose 100 ms
+  interval sits at the edge of the same budget rather than inside it, and the
+  camera's byte rate is what differs. Still short of locking a
   picture to the head at 1:1, which wants under 20 ms. **Three earlier entries
   here said this was impossible, a fourth said it was unwritten, and a fifth
   blamed the camera for a rate we were imposing**; the first three were our
