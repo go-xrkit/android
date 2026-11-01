@@ -1208,15 +1208,38 @@ falling **79 → 14 → 0** as `StreamURBs` goes 4 → 8 → 16 are independentl
 reproducible (tonight: 2 dropped at 4, none at 16), and *they* are what justifies
 the constant. "The ring mattered" holds; "23.8 fps" does not.
 
-⚠ **One live lead remains, and it is not about conditions at all.** The camera's
+⚠ **One lead remains, and it is not about conditions at all.** The camera's
 activity **LED does not light** while we stream — observed on 2026-11-01 — even
 though the pixels are real and their mean luminance tracks the scene. A UVC
-camera's LED is wired to its capture state, so the camera may be producing frames
-without considering itself *started*, which would make 32 % fill an expected
-consequence rather than a mystery. This repository already documents that UVC
-treats the move **away from alternate 0 after the commit** as the start signal;
-whether our sequence completes that handshake the way `uvcvideo` does is now the
-open question.
+camera's LED is usually wired to its capture state, so the camera may be
+producing frames without considering itself *started*, which would make 32 %
+fill an expected consequence rather than a mystery.
+
+⛔ **But "our handshake is wrong" is ruled out by reading, and that saves the
+next session the search.** Three independent implementations agree with this
+package on both decisions that could matter:
+
+| | the kernel's `uvcvideo` | `libuvc` | here |
+|---|---|---|---|
+| order | probe/commit, **then** set the alternate | same | same |
+| which alternate | smallest whose periodic payload ≥ the committed one | first that fits, "assume that the packet sizes are increasing" | `PickAlternate`: smallest that fits |
+| `wMaxPacketSize` | `usb_endpoint_max_periodic_payload` | `(w & 0x7ff) * (((w >> 11) & 3) + 1)` | `ISOPacketSize`, same arithmetic |
+
+So the sequence is not the anomaly. ⚠ It also means **an Android UVC viewer app
+would not discriminate**: those are libuvc-based and take this same path through
+`usbfs`, so their LED would behave as ours does. Nothing is gained by installing
+one.
+
+⚠ And the kernel's own path cannot be driven from here to compare: `/dev/video0`
+is `system:camera 0660`, the `shell` user is **not** in group `camera` (1006),
+and `dd` on it answers *Permission denied*. Testing whether `uvcvideo` lights
+the LED needs root or the camera service, neither of which is available on an
+unrooted phone.
+
+What is left, then, is that this camera **commits to 2400 bytes an interval and
+sends ~780**, consistently, in every condition tested — and that its LED may
+simply not be wired to UVC streaming on this unit. Neither is a defect anybody
+here can fix.
 
 ### What had been eliminated before that, each by a measurement
 
