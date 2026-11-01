@@ -42,16 +42,52 @@ public final class XrConsentActivity extends Activity {
     }
 
     private void answer(int code, Intent data) {
+        // ⭐ SAY WHAT THE PLATFORM HANDED BACK. "Refused" is a verdict about a
+        // PERSON, and this host printed it without ever naming the number it
+        // read. On 2026-11-01 the wearer tapped Start, the host logged
+        // `consent refused`, and nothing said whether that was RESULT_CANCELED,
+        // a null Intent, or an answer that never arrived -- three different
+        // defects wearing one sentence.
+        Log.i(XrHostService.TAG, "consent result code=" + code
+                + " (OK=" + RESULT_OK + ", CANCELED=" + RESULT_CANCELED + ")"
+                + ", data=" + (data == null ? "null" : "present"));
+
         Intent i = new Intent(this, XrHostService.class)
                 .setAction(XrHostService.ACTION_CONSENT)
                 .putExtra(XrHostService.EXTRA_CODE, code);
         if (data != null) {
             i.putExtra(XrHostService.EXTRA_DATA, data);
         }
-        // A foreground service: from API 34 the projection token is refused
-        // unless a mediaProjection service is ALREADY running when it is asked
-        // for, so the service must come up on the way in, not afterwards.
-        startForegroundService(i);
+        if (code == RESULT_OK && data != null) {
+            // A foreground service: from API 34 the projection token is refused
+            // unless a mediaProjection service is ALREADY running when it is
+            // asked for, so the service must come up on the way in, not
+            // afterwards.
+            startForegroundService(i);
+        } else {
+            // ⛔⛔ A REFUSAL MUST NOT BE A FOREGROUND START, AND IT KILLED THE
+            // PROCESS WHEN IT WAS. XrHostService.onStartCommand calls
+            // startForeground() only when consent was GRANTED -- it has to,
+            // because starting an FGS of type mediaProjection without a
+            // projection permission does not fail, it kills the process (see
+            // the note there). So a refusal arrived through
+            // startForegroundService, nothing ever went foreground, and thirty
+            // seconds later the platform threw:
+            //
+            //   ForegroundServiceDidNotStartInTimeException:
+            //   Context.startForegroundService() did not then call
+            //   Service.startForeground()
+            //
+            // Measured on a Pixel 11 Pro Fold on 2026-11-01 at 11:48:54. It
+            // takes the WHOLE process with it -- the wall host, the display
+            // list, the application -- so one declined dialog ended a session
+            // that had every right to carry on and simply go without capture.
+            //
+            // An ordinary start delivers a refusal perfectly well, and this
+            // activity is in the foreground while it runs, so the start is
+            // permitted.
+            startService(i);
+        }
         finish();
         overridePendingTransition(0, 0);
     }

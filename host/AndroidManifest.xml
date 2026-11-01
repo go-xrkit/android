@@ -86,10 +86,31 @@
                   android:noHistory="true"
                   android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
+        <!-- ⛔⛔ NO noHistory HERE, AND THE DOCUMENTATION SAYS WHY IN ONE LINE.
+             This activity exists to call startActivityForResult on the
+             MediaProjection consent dialog, and android:noHistory is documented
+             as: "In this case, onActivityResult() is never called if you start
+             another activity for a result from this activity."
+             (developer.android.com, the <activity> manifest element.)
+
+             It carried noHistory="true" anyway, and the cost was measured on a
+             Pixel 11 Pro Fold on 2026-11-01: the wearer tapped Start, the host
+             logged `consent refused`, and xrdesk went back to waiting for a
+             permission it had just been granted. The log blamed the person for
+             a decision they had not made.
+
+             excludeFromRecents stays — a transparent one-question activity has
+             no business in the recents list — and answer() finishes the
+             activity itself as soon as the answer is in, so noHistory was
+             buying nothing that was not already being done correctly.
+
+             ⚠ XrUsbPermissionActivity keeps noHistory DELIBERATELY: it asks
+             through UsbManager.requestPermission with a broadcast
+             PendingIntent, so its answer arrives at a receiver rather than as
+             an activity result. The documented trap is about results only. -->
         <activity android:name="org.goxrkit.android.XrConsentActivity"
                   android:exported="false"
                   android:excludeFromRecents="true"
-                  android:noHistory="true"
                   android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- The wall host: displays this app creates and owns. It asks for NO
