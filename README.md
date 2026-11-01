@@ -1252,6 +1252,7 @@ are kept because they are what a later session would otherwise redo:
 | the glasses' **display** being active | `dumpsys display` shows the Beast `state ON` on both evenings |
 | the camera's state after being **taken from `uvcvideo`** | measured immediately after a replug, on a freshly bound device: the same signature |
 | `-width 640` forced vs the **default** pick | identical negotiation — `YUY2 640×480 @25fps`, payload 2400, alternate 5 |
+| the headset **worn** vs sitting on a desk | the condition this section used to name as "the next thing to try": tried on 2026-11-01 with the headset on a head and the glasses pointed at a light — 9.97 fps, the same signature |
 
 ⛔⛔ **The light was refuted TWICE, and the first time did not count.** The first
 attempt pointed the glasses at a lamp in a dark room: luminance went `4..86` →
@@ -1261,10 +1262,13 @@ auto-exposure integrates over the mean. The probe only reported a range, so the
 experiment could not tell the two apart and *looked* conclusive. It reports the
 mean now, and the doubling above is what a real refutation needed.
 
-**What is left**: the glasses were being **worn** for the 18 October runs and sat
-on a desk for all of these — uncontrolled both times, and the next thing to try.
-Beyond that, nothing is named: temperature, firmware state, the hub, and the
-phone's USB power budget are all unexamined.
+⛔ **This paragraph used to name "worn vs on a desk" as the next thing to try,
+and it stayed there after the experiment was done.** Seventy lines above, the
+eight-run list already said *"the headset **worn** and on a desk"* — so the
+README contradicted itself for a day. The row is in the table now. Nothing
+beyond it is named: temperature, firmware state, the hub, and the phone's USB
+power budget are all unexamined, and since the figure they were meant to explain
+is withdrawn, there is nothing left for them to explain either.
 
 ⚠ **The experiment that misled me was right about its own conditions.** "Sixteen
 requests changed nothing" was measured with a consumer costing 0.3 ms, where a
