@@ -1175,11 +1175,53 @@ device, and the sentence that presented it as "the" rate was wrong.** What
 `StreamURBs = 16` is justified by survives: it removes the dropped frames in
 both regimes.
 
-### What has been eliminated, and what is left
+### ⛔⛔⛔ RESOLVED on 2026-11-01: the figure is not reproducible by its OWN code
 
-Why the same camera, identically negotiated, gives ~1 830 bytes an interval one
-day and 781 another is **unexplained** — but four candidates are now ruled out,
-each by a measurement rather than by argument:
+The question below — *what condition differed between the two evenings* —
+assumed the 23.8 was a measurement of something. It is not reproducible:
+
+```
+# v0.16.0 checked out, the exact commit that reported 23.8 fps (#36),
+# run on the same phone and the same glasses on 2026-11-01:
+10 frames in 998ms; 7984 packets (8 empty), 6239712 bytes; 0 dropped, 0 late
+ANSWER 10 WHOLE FRAMES at 10 fps
+```
+
+**Eight runs now, all ten:** 9.97 · 10.0 · 9.98 · 10.0 · 9.97 · 9.99 · 9.97 ·
+10.0 — across **two versions of this code**, five scene luminance means (22.9 to
+114.6), the headset **worn** and on a desk, and a freshly enumerated camera.
+
+Three facts converge, and none of them needs an assumption about the device:
+
+| | |
+|---|---|
+| the **decoupling is cleared** | the old coupled reader gives the same 10 fps today, so v0.17.0 did not cost anything |
+| 23.8 is **not reproducible by the code that produced it** | on its own hardware |
+| and it **contradicts the byte budget of the day before** | 832 bytes an interval, measured 2026-10-17, allows 10.5 fps; 23.8 needs ~1 830, and that table itself says 25 fps would need 1 920 |
+
+**So it was neither a camera condition nor a regression: it is a figure that
+cannot be relied on.** What its error *was* is not claimed here — that cannot be
+proved now — but nothing rests on it any more.
+
+⭐ **And what the ring sweep established survives by something else.** The drops
+falling **79 → 14 → 0** as `StreamURBs` goes 4 → 8 → 16 are independently
+reproducible (tonight: 2 dropped at 4, none at 16), and *they* are what justifies
+the constant. "The ring mattered" holds; "23.8 fps" does not.
+
+⚠ **One live lead remains, and it is not about conditions at all.** The camera's
+activity **LED does not light** while we stream — observed on 2026-11-01 — even
+though the pixels are real and their mean luminance tracks the scene. A UVC
+camera's LED is wired to its capture state, so the camera may be producing frames
+without considering itself *started*, which would make 32 % fill an expected
+consequence rather than a mystery. This repository already documents that UVC
+treats the move **away from alternate 0 after the commit** as the start signal;
+whether our sequence completes that handshake the way `uvcvideo` does is now the
+open question.
+
+### What had been eliminated before that, each by a measurement
+
+These were taken while the question was still *"which condition differed"*. They
+are kept because they are what a later session would otherwise redo:
 
 | candidate | how it died |
 |---|---|
