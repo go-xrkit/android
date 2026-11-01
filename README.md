@@ -2112,7 +2112,24 @@ glasses on its USB-C port. What that device answered, and nothing more:
 - owned displays go to **32768×1080**, with 0 wrong and 0 black pixels over
   35 389 440 sampled — see [`cmd/xrwide`](cmd/xrwide);
 - `startForeground` with `mediaProjection` and no consent **kills the process**
-  on API 37, which is why the host only goes foreground once consent exists;
+  on API 37, which is why the host only goes foreground once consent exists —
+  and the other half of that rule cost a session: a **refusal** must not be a
+  `startForegroundService` either. It was, nothing ever went foreground, and
+  thirty seconds later `ForegroundServiceDidNotStartInTimeException` took the
+  whole process with it, wall host included. One declined dialog ended a run
+  that could have carried on without capture. A refusal goes through an
+  ordinary `startService` now;
+- ⛔⛔ **and the consent Activity must not be `android:noHistory`**, which it
+  was. The documentation is one sentence: *"In this case, `onActivityResult()`
+  is never called if you start another activity for a result from this
+  activity."* Measured on 2026-11-01: the wearer tapped **Start**, the host
+  logged `consent refused`, and `xrdesk` went back to waiting for a permission
+  it had just been granted — the log blaming a person for a decision they had
+  not made. The attribute is gone, a Go test asserts it stays gone
+  (`TestTheConsentActivityKeepsNoHistoryOff`, with the USB activity as its
+  positive control since that one keeps `noHistory` deliberately — its answer
+  arrives as a broadcast, not as a result), and the host now logs the result
+  **code** it read rather than its own verdict about somebody;
 - and the glasses take a `Presentation` carrying pixels Go painted —
   [`cmd/xrscreen`](cmd/xrscreen), **3600 frames of 1920×1080 in 2m0s at 30.0 fps,
   3600 acknowledged, 0 waits.** The queue never emptied: 248 MB/s of copies
