@@ -64,22 +64,22 @@ func run(ctx context.Context, args []string) int {
 		}
 	}()
 
-	dev, ok := awaitCamera(ctx, *wait, say)
-	if !ok {
-		return 1
-	}
-	say("CAMERA %s %04x:%04x %q", dev.Name, dev.VendorID, dev.ProductID, dev.Product)
-
-	h, err := android.OpenUSB(ctx, dev)
+	// ⭐ THE NINE-STEP OPEN LIVES IN THE PACKAGE NOW. It was written here, and
+	// go-xrkit/desk needs the identical sequence to follow a head on Android —
+	// two copies of an order that is only correct in one order is how one of
+	// them drifts. The stage lines below are unchanged: they are this probe's
+	// measurement protocol, quoted in the README, so android.OpenCamera prints
+	// them through the same `say`.
+	cam, err := android.OpenUVCCamera(ctx, android.UVCCameraOptions{Wait: *wait}, say)
 	if err != nil {
-		say("FAIL open: %v", err)
+		say("FAIL open camera: %v", err)
 		return 1
 	}
 	defer func() {
-		if err := h.Close(); err != nil {
+		if err := cam.Close(); err != nil {
 			say("⚠ %v", err)
 		}
-		if d := h.Detached(); len(d) > 0 {
+		if d := cam.Detached(); len(d) > 0 {
 			// ⛔ PRINTED WHETHER THIS SUCCEEDED OR NOT. Claiming the streaming
 			// interface takes it from uvcvideo and the reconnect does not
 			// restore the binding on this phone, so the camera is left with no
@@ -90,71 +90,7 @@ func run(ctx context.Context, args []string) int {
 		}
 	}()
 
-	desc, err := h.Descriptors()
-	if err != nil {
-		say("FAIL descriptors: %v", err)
-		return 1
-	}
-	ifaces, err := desc.Interfaces()
-	if err != nil {
-		say("FAIL interfaces: %v", err)
-		return 1
-	}
-	iface, ok := streamingInterface(ifaces)
-	if !ok {
-		say("FAIL no UVC streaming interface on %s", dev.Name)
-		return 1
-	}
-	if err := h.ClaimInterface(iface); err != nil {
-		say("FAIL claim %d: %v", iface, err)
-		return 1
-	}
-	// ⛔ ZERO BANDWIDTH WHILE NEGOTIATING, and the operating alternate only
-	// after the commit: UVC takes the move away from alternate 0 as the signal
-	// to start sending, so arriving there first means it never happens. See the
-	// repository's README for the fifteen seconds of empty packets that taught
-	// this.
-	if err := h.SetAltSetting(iface, android.ZeroBandwidthAlternate); err != nil {
-		say("FAIL park at alternate 0: %v", err)
-		return 1
-	}
-
-	formats, err := desc.UVCFormats(iface)
-	if err != nil {
-		say("FAIL formats: %v", err)
-		return 1
-	}
-	want, size, err := android.PickFormat(formats)
-	if err != nil {
-		say("FAIL pick: %v", err)
-		return 1
-	}
-	neg, err := h.Negotiate(iface, want, size)
-	if err != nil {
-		say("FAIL negotiate: %v", err)
-		return 1
-	}
-	say("FORMAT %s %s, payload %d", want.Format, size, neg.MaxPayload)
-
-	alt, ep, ok := android.PickAlternate(ifaces, iface, neg.MaxPayload)
-	if !ok {
-		say("FAIL no alternate of interface %d carries %d bytes an interval",
-			iface, neg.MaxPayload)
-		return 1
-	}
-	if err := h.SetAltSetting(alt.Number, alt.Alternate); err != nil {
-		say("FAIL alternate %d: %v", alt.Alternate, err)
-		return 1
-	}
-
-	s, err := h.Stream(neg, ep, size.Width, size.Height)
-	if err != nil {
-		say("FAIL stream: %v", err)
-		return 1
-	}
-	defer func() { _ = s.Close() }()
-
-	return track(ctx, s, size, *dur, say)
+	return track(ctx, cam.Stream(), cam.Size, *dur, say)
 }
 
 // track feeds every frame to the tracker and reports what each stage costs.
