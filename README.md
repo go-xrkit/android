@@ -1865,9 +1865,36 @@ It finds the SDK and the JDK itself, so the two exports are not needed; set
 
 `tools/xrpack` is the packager: `javac`, `d8`, `aapt2` and `apksigner` do what
 only they can, and the order, the arguments, the manifest and the **zip** are
-Go. Another module's binary is packaged by handing it over —
-`xrpack.Options{AppBin: …, Edits: xrpack.Edits{Package: "org.example.app"}}` —
-which is how `xrdesk` is packaged from `go-xrkit/desk`.
+Go.
+
+**An application from another module is still one command.** The host does not
+care which Go program it spawns — it owns the projection and the socket, and the
+application owns everything above the pixels — so any CGO-free `android/arm64`
+binary is a valid payload, and building it is that module's business:
+
+```sh
+# in go-xrkit/desk
+CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -o /tmp/xrdesk ./cmd/xrdesk
+# here
+go run ./tools/xrrun -build-only \
+    -app-bin /tmp/xrdesk -package org.example.xrdesk -label xrdesk -apk xrdesk
+adb install -r host/out/xrdesk.apk
+```
+
+Run on 2026-11-07 with `xrdesk` from `go-xrkit/desk` v0.4.1, which is the
+witness for the manifest substitution as well as for the packaging — `aapt2 dump
+packagename` answers `org.example.xrdesk`, and `apksigner verify` passes:
+
+```
+==> package (dex 69648 B compressed, payload 11534630 B stored and 16384-aligned)
+==> zipalign -c -P 16: 1 librar(y/ies) examined, stored and aligned
+```
+
+⛔ **`-package` and `-app-bin` are refused without `-build-only`**, because
+everything after the build — `install`, `pm grant`, `am start`, `run-as` — names
+`org.goxrkit.androidhost`: a renamed APK would be installed and then watched at
+the wrong address, and a transcript that never arrives reads exactly like a
+probe that said nothing.
 
 ### ⛔⛔ The alignment check that passed without looking
 

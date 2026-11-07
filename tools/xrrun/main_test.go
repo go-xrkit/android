@@ -320,6 +320,45 @@ func TestTheTableAndTheFlagAreMergedOnce(t *testing.T) {
 	}
 }
 
+// TestPackagingSomebodyElsesBinaryIsStillOneCommand.
+//
+// ⛔ host/build.sh TOOK `APP_BIN=… PACKAGE=…` ON ITS COMMAND LINE, and routing
+// that through a Go API alone would have turned "put xrdesk on the phone" into
+// "write a program that puts xrdesk on the phone" — a capability removed rather
+// than moved. The flags exist, and they refuse where this tool could not follow
+// through.
+func TestPackagingSomebodyElsesBinaryIsStillOneCommand(t *testing.T) {
+	// ⛔ AND THE REFUSAL IS THE POINT: everything after the build names
+	// org.goxrkit.androidhost, so a renamed APK would be installed and then
+	// watched at the wrong address — a transcript that never arrives reads
+	// exactly like a probe that said nothing.
+	for _, argv := range [][]string{
+		{"-package", "org.example.app"},
+		{"-app-bin", "/tmp/xrdesk"},
+		{"-app-bin", "/tmp/xrdesk", "-package", "org.example.app"},
+	} {
+		err := run(context.Background(), argv)
+		if err == nil {
+			t.Errorf("%v was accepted without -build-only", argv)
+			continue
+		}
+		if !strings.Contains(err.Error(), "-build-only") {
+			t.Errorf("%v: refusal %q does not say which mode they belong to", argv, err)
+		}
+	}
+	// With -build-only the flags are accepted as far as the tool chain, which
+	// is where this test stops: it has no SDK and no phone, so the refusal must
+	// be about one of those and NOT about the flags.
+	err := run(context.Background(), []string{"-build-only", "-app-bin", "/nonexistent/xrdesk",
+		"-package", "org.example.app", "-label", "Example"})
+	if err == nil {
+		t.Fatal("a missing payload was packaged")
+	}
+	if strings.Contains(err.Error(), "-build-only") {
+		t.Errorf("-build-only refused its own flags: %v", err)
+	}
+}
+
 func TestFirstLinesStopsWhereItIsAsked(t *testing.T) {
 	// A crash dump is hundreds of lines and the first few name the cause; the
 	// rest is the platform's own stack.
