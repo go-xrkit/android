@@ -6,9 +6,10 @@
 // displays of its own, render Android content on them and read the pixels back
 // — and that the limit that keeps it from rebooting the phone actually refuses.
 //
-// It is packaged into the APK by host/build.sh and reports to logcat:
+// It is packaged into the APK by tools/xrpack and reports to logcat:
 //
-//	APP=./cmd/xrwall host/build.sh && adb install -r host/out/xrhost.apk
+//	go run ./tools/xrrun -build-only -app ./cmd/xrwall
+//	adb install -r host/out/xrhost.apk
 //	adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity
 //	adb logcat -s xrwall xr-wall
 //

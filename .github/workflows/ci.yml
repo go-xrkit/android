@@ -109,10 +109,11 @@ jobs:
           awk -v t="$cov" 'BEGIN { exit !(t+0 >= 100.0) }' || {
             echo "::error::coverage ${cov}% < 100%"; exit 1; }
 
-  # The APK itself: no Gradle, no Kotlin -- javac, d8, aapt2, zipalign and
-  # apksigner against the runner's own SDK. This proves the shipped host
-  # sources and build.sh still produce a signed, installable package, and that
-  # the Go application still cross-builds into it.
+  # The APK itself: no Gradle, no Kotlin -- javac, d8, aapt2 and apksigner
+  # against the runner's own SDK, ordered by tools/xrpack, which also writes the
+  # zip. This proves the shipped host sources and the packager still produce a
+  # signed, installable package, and that the Go application still cross-builds
+  # into it.
   # The Windows peer of darwin-stub. The module already CROSS-BUILDS for
   # windows/amd64 and windows/arm64 in the `cross` job, which proves it
   # compiles and nothing more; this runs the suite on a real Windows host, the
@@ -147,8 +148,17 @@ jobs:
         with:
           go-version: '1.27.3'
       - run: go version
+      # -build-only packages and stops: no device, no install, no transcript.
+      # The packager refuses an APK whose payload is compressed or misaligned,
+      # and asks the SDK's own zipalign to agree -- so this step is a gate on
+      # the artefact and not merely on the build succeeding.
       - name: Build the APK
-        run: ANDROID_HOME=${ANDROID_HOME:-$ANDROID_SDK_ROOT} host/build.sh
+        # -app is spelled out: xrrun's own default is the USB probe, and what
+        # this job has always packaged is the capture host.
+        run: ANDROID_HOME=${ANDROID_HOME:-$ANDROID_SDK_ROOT} go run ./tools/xrrun -build-only -app ./cmd/xrcapture
+      # ⛔ AND THE SIGNATURE IS CHECKED BY A TOOL THAT IS NOT OURS. The packager
+      # verifies alignment itself; a signature it also verified itself would be
+      # a claim with no independent witness.
       - name: Verify the signature
         run: |
           # find, not ls: shellcheck is right that ls output is not a safe

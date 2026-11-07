@@ -43,7 +43,26 @@
          so a whole run was measured, written down, and unreadable, with the
          logcat ring buffer long since rotated. This is a diagnostic host that
          exists to be read from a cable; it is not shipped to anybody. -->
+    <!-- ⛔⛔ extractNativeLibs="false" IS WHAT MAKES THE STORED PAYLOAD WORTH
+         ITS SIZE, and without it this attribute's absence turned a 1.14 MB APK
+         into a 2.89 MB one for nothing. tools/xrpack stores
+         lib/<abi>/libxrapp.so uncompressed and 16 KiB-aligned so the platform
+         can map it straight out of the APK; left to default, the platform
+         extracts a second copy at install anyway and the device carries both.
+         Measured 2026-11-07, same sources, same SDK:
+
+             host/build.sh   lib at 35929, "OK - compressed", APK 1 139 277 B
+             tools/xrpack    lib at 49152 = 3 x 16384, "OK",   APK 2 888 273 B
+
+         The APK is bigger and the DEVICE carries less: one mapped copy instead
+         of a compressed one plus an extracted one.
+
+         ⚠ THE TWO MUST AGREE. A packer that compresses the library with this
+         set to false ships a library the loader cannot map; a packer that
+         stores it without this set pays the size twice. hostmanifest_test.go
+         asserts the attribute for exactly that reason. -->
     <application android:label="go-xrkit" android:hasCode="true"
+                 android:extractNativeLibs="false"
                  android:debuggable="true">
         <activity android:name="org.goxrkit.android.XrDemoActivity"
                   android:exported="true"

@@ -14,7 +14,8 @@
 // accepted and then hands back a black buffer is the silent failure this whole
 // mechanism has to be proved against.
 //
-//	APP=./cmd/xrwide host/build.sh && adb install -r host/out/xrhost.apk
+//	go run ./tools/xrrun -build-only -app ./cmd/xrwide
+//	adb install -r host/out/xrhost.apk
 //	adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity --ez capture false
 //	adb logcat -s xrwide
 //
