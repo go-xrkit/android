@@ -412,7 +412,8 @@ than on the absence of an error. The artefact is `wall-sentinel.png`; it is
 **not committed** — see [Where captures go](#where-captures-go).
 
 ```sh
-APP=./cmd/xrwall host/build.sh && adb install -r host/out/xrhost.apk
+go run ./tools/xrrun -build-only -app ./cmd/xrwall
+adb install -r host/out/xrhost.apk
 # `--ez capture false` skips the mediaProjection foreground service, which the
 # platform KILLS THE PROCESS for starting without the project_media app-op.
 adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity --ez capture false
@@ -678,7 +679,8 @@ measurement, it does not belong in a table with the frame counts, and it is the
 best evidence that exists for this half of the package.
 
 ```sh
-APP=./cmd/xrscreen host/build.sh && adb install -r host/out/xrhost.apk
+go run ./tools/xrrun -build-only -app ./cmd/xrscreen
+adb install -r host/out/xrhost.apk
 adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity \
     --ez capture false --es args '-wait 20m -frames 3600 -fps 30 -hold 60s'
 # unplug the cable, attach the glasses, look
@@ -1850,18 +1852,65 @@ No Gradle and no Kotlin: the host is three Java files and the application is a
 Go binary, so the SDK's own tools are the whole tool chain.
 
 ```sh
-export ANDROID_HOME=... JAVA_HOME=...
 sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
-host/build.sh                                # → host/out/xrhost.apk
+go run ./tools/xrrun -build-only            # → host/out/xrhost.apk
 adb install host/out/xrhost.apk
 adb shell pm grant org.goxrkit.androidhost android.permission.POST_NOTIFICATIONS
 adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity
 adb logcat -s xrcapture xr-host
 ```
 
-`APP_BIN=/path/to/binary PACKAGE=org.example.app host/build.sh` packages an
-application from another module; the flags are the same ones
-`go-widgets/android`'s script takes, because it is the same script.
+It finds the SDK and the JDK itself, so the two exports are not needed; set
+`ANDROID_HOME` or `JAVA_HOME` to override what it finds.
+
+`tools/xrpack` is the packager: `javac`, `d8`, `aapt2` and `apksigner` do what
+only they can, and the order, the arguments, the manifest and the **zip** are
+Go. Another module's binary is packaged by handing it over —
+`xrpack.Options{AppBin: …, Edits: xrpack.Edits{Package: "org.example.app"}}` —
+which is how `xrdesk` is packaged from `go-xrkit/desk`.
+
+### ⛔⛔ The alignment check that passed without looking
+
+This used to be `host/build.sh`, 130 lines of shell, and replacing it was not a
+matter of taste. The script ended in `zip` then `zipalign`, and that pair cannot
+do the job:
+
+```
+$ zipalign -c -P 16 -v 4 host/out/xrhost.apk     # the script's own output
+   35929 lib/arm64-v8a/libxrapp.so (OK - compressed)
+Verification succesful                            # exit status 0
+```
+
+**`zipalign` aligns entries that are STORED, and `zip` deflates by default.** So
+the payload was compressed, the alignment check had no subject, and it answered
+`OK` — alignment "does not apply" and "is correct" come out as the same word.
+Measured here on 2026-11-07 with build-tools 35.0.0.
+
+`tools/xrpack` writes the zip itself: the dex compressed, the payload **stored
+and 16 KiB-aligned**, with the padding carried in the local header's extra field
+the way `zipalign` does it. Same sources, same SDK, same day:
+
+| | `host/build.sh` | `tools/xrpack` |
+|---|---|---|
+| `lib/arm64-v8a/libxrapp.so` at | 35929 | **49152** = 3 × 16384 |
+| `zipalign -c -P 16` says | `OK - compressed` | `OK` |
+| APK | 1 139 277 B | 2 888 273 B |
+
+⛔ **16 KiB, not 4.** `developer.android.com/tools/zipalign` says of the flag
+the script used: *"It is recommended to use `-P 16` instead, as `-p` is
+deprecated"* — a device with 16 KiB pages cannot map a library aligned to 4.
+
+⚠ **The APK is bigger and the device carries less.** `extractNativeLibs="false"`
+in the manifest is the other half: without it the platform extracts a second
+copy at install and the size is paid twice. A test asserts the attribute,
+because the packer and the manifest are two decisions in two files that have to
+agree, and both ways of getting it wrong are silent.
+
+And the rest of what the shell could not do: a permission name or a label is
+**escaped** into the manifest rather than spliced by `sed` — where an unescaped
+`&` stands for the whole match, so `LABEL='A&B'` produced the attribute it was
+replacing — and a substitution that matches **nothing** is a refusal instead of
+`sed` printing its input unchanged and exiting 0.
 
 `arm64` is the only CGO-free Android architecture — `android/arm`,
 `android/amd64` and `android/386` all answer *"requires external (cgo) linking,
@@ -1990,9 +2039,14 @@ only with a phone attached is how `usb` survived four releases.
 releases, and a tool that refused to run because it could not find a field would
 be worse than the crash it avoids — the crash at least names its own cause.
 
-`host/build.sh` stays a script,
-because `aapt2`, `javac`, `d8`, `zipalign` and `apksigner` in a row have no
-decisions in them.
+⛔⛔ **This README used to say `host/build.sh` "stays a script, because `aapt2`,
+`javac`, `d8`, `zipalign` and `apksigner` in a row have no decisions in them".**
+It had six — which platform, which build-tools, build or copy, resources or not,
+keystore or not, and what to splice into the manifest — and one of them was
+wrong in a way nothing could see: `zipalign` was checking an entry `zip` had
+compressed, and answering `OK`. See *The alignment check that passed without
+looking*, above. **A sentence explaining why something need not be examined is
+the first thing to re-examine.**
 
 ⚠ **`cmd/xrusb` leaves a debt.** Claiming the camera's streaming interface
 detaches `uvcvideo`, and `USBDEVFS_CONNECT` does **not** put it back on this
@@ -2065,7 +2119,7 @@ adb push xr.test /data/local/tmp/
 adb shell 'cd /data/local/tmp && chmod +x xr.test && TMPDIR=/data/local/tmp ./xr.test'
 
 # 3. the end-to-end capture, through a real APK
-host/build.sh && adb install -r host/out/xrhost.apk
+go run ./tools/xrrun -build-only && adb install -r host/out/xrhost.apk
 adb shell pm grant org.goxrkit.androidhost android.permission.POST_NOTIFICATIONS
 adb shell appops set org.goxrkit.androidhost PROJECT_MEDIA allow   # skips the
                        # consent dialog; an adb-only shortcut, never an app one

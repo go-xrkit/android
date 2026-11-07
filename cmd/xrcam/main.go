@@ -30,7 +30,8 @@
 // ORDER. This asks, costs nobody a permission dialog, and says which of the two
 // is open — including when the answer is neither.
 //
-//	APP=./cmd/xrcam host/build.sh && adb install -r host/out/xrhost.apk
+//	go run ./tools/xrrun -build-only -app ./cmd/xrcam
+//	adb install -r host/out/xrhost.apk
 //	adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity \
 //	    --ez capture false --es args '-wait 20m'
 //	# unplug the cable, attach the glasses, wait, plug the cable back

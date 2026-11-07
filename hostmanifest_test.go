@@ -18,11 +18,58 @@ import (
 // implementation of aapt2.
 type manifest struct {
 	App struct {
-		Activities []struct {
+		ExtractNativeLibs string `xml:"http://schemas.android.com/apk/res/android extractNativeLibs,attr"`
+		HasCode           string `xml:"http://schemas.android.com/apk/res/android hasCode,attr"`
+		Activities        []struct {
 			Name      string `xml:"http://schemas.android.com/apk/res/android name,attr"`
 			NoHistory string `xml:"http://schemas.android.com/apk/res/android noHistory,attr"`
 		} `xml:"activity"`
 	} `xml:"application"`
+}
+
+// readManifest parses the shipped host manifest.
+func readManifest(t *testing.T) manifest {
+	t.Helper()
+	b, err := os.ReadFile("host/AndroidManifest.xml")
+	if err != nil {
+		t.Fatalf("the host manifest is what this asserts about: %v", err)
+	}
+	var m manifest
+	if err := xml.Unmarshal(b, &m); err != nil {
+		t.Fatalf("parsing the host manifest: %v", err)
+	}
+	return m
+}
+
+// TestTheManifestAgreesWithHowThePayloadIsPackaged.
+//
+// ⛔⛔ TWO DECISIONS IN TWO FILES THAT MUST MATCH. tools/xrpack stores
+// lib/<abi>/libxrapp.so uncompressed and 16 KiB-aligned so the platform can map
+// it out of the APK; that only pays off with extractNativeLibs="false" here.
+// Get the pair wrong either way and nothing fails loudly:
+//
+//   - stored, attribute absent: the platform extracts a second copy anyway, and
+//     the APK is 2.89 MB instead of 1.14 MB for nothing (measured 2026-11-07).
+//   - compressed, attribute false: the library cannot be mapped, and the
+//     failure is at startup on a device, not in any build.
+//
+// ⚠ AND THE CONTROL IS hasCode. Asserting that an attribute EQUALS something
+// passes just as well when the field is never read — one wrong namespace in the
+// struct tag and every attribute is "". hasCode is "true" in the manifest, so
+// it must come back "true" here.
+func TestTheManifestAgreesWithHowThePayloadIsPackaged(t *testing.T) {
+	t.Parallel()
+	m := readManifest(t)
+	if m.App.HasCode != "true" {
+		t.Fatalf("hasCode came back %q, want \"true\": the attributes of <application> are "+
+			"not being read, so the assertion below proves nothing", m.App.HasCode)
+	}
+	if m.App.ExtractNativeLibs != "false" {
+		t.Errorf("android:extractNativeLibs is %q, want \"false\": tools/xrpack stores the "+
+			"payload uncompressed and page-aligned, and without this the platform extracts "+
+			"a second copy at install — the APK pays the size and the device pays it twice",
+			m.App.ExtractNativeLibs)
+	}
 }
 
 // ⛔⛔ noHistory ON AN ACTIVITY THAT ASKS FOR A RESULT THROWS THE RESULT AWAY,
@@ -48,14 +95,7 @@ type manifest struct {
 func TestTheConsentActivityKeepsNoHistoryOff(t *testing.T) {
 	t.Parallel()
 
-	b, err := os.ReadFile("host/AndroidManifest.xml")
-	if err != nil {
-		t.Fatalf("the host manifest is what this asserts about: %v", err)
-	}
-	var m manifest
-	if err := xml.Unmarshal(b, &m); err != nil {
-		t.Fatalf("parsing the host manifest: %v", err)
-	}
+	m := readManifest(t)
 	// ⛔ A PARSE THAT FOUND NOTHING IS NOT A MANIFEST THAT PASSES. An empty
 	// activity list would satisfy every assertion below, which is the shape of
 	// a scan that could not read reporting zero findings.

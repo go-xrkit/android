@@ -11,7 +11,8 @@
 // application may not capture a display it does not own. The glasses are the
 // only instrument, and the person wearing them is the only witness.
 //
-//	APP=./cmd/xrscreen host/build.sh && adb install -r host/out/xrhost.apk
+//	go run ./tools/xrrun -build-only -app ./cmd/xrscreen
+//	adb install -r host/out/xrhost.apk
 //	adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity --ez capture false
 //	adb logcat -d -s xrcapture xr-wall
 //	adb shell run-as org.goxrkit.androidhost cat files/screen.txt

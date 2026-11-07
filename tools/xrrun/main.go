@@ -9,7 +9,7 @@
 //
 // Every measurement in this package's README was taken by hand, with this:
 //
-//	APP=./cmd/xrusb PERMISSIONS=… host/build.sh
+//	APP=./cmd/xrusb PERMISSIONS=… host/build.sh      (the script that was)
 //	adb -s … install -r host/out/xrhost.apk
 //	adb -s … shell run-as org.goxrkit.androidhost rm -f files/usb.txt
 //	adb -s … shell am force-stop org.goxrkit.androidhost
@@ -47,9 +47,11 @@ import (
 	"time"
 
 	"github.com/go-appdirs/outdir"
+
+	"github.com/go-xrkit/android/tools/xrpack"
 )
 
-// pkg is the APK this repository builds, and the one host/build.sh defaults to.
+// pkg is the APK this repository builds, and the one tools/xrpack defaults to.
 const pkg = "org.goxrkit.androidhost"
 
 // activity is the one that spawns the Go binary; see XrDemoActivity.
@@ -125,10 +127,11 @@ type options struct {
 	// hands is how long to wait for the person who has to unlock the phone,
 	// which is a different quantity from patience: one waits for a machine and
 	// the other for somebody to come back to their desk.
-	hands   time.Duration
-	build   bool
-	install bool
-	pull    bool
+	hands     time.Duration
+	build     bool
+	buildOnly bool
+	install   bool
+	pull      bool
 }
 
 func run(ctx context.Context, argv []string) error {
@@ -143,6 +146,13 @@ func run(ctx context.Context, argv []string) error {
 		"wake and unlock the phone, which no tool can do for them")
 	fs.BoolVar(&o.build, "build", true, "build the APK first")
 	fs.BoolVar(&o.install, "install", true, "install it")
+	// ⛔ A BUILD THAT NEEDS NO PHONE MUST NOT ASK FOR ONE. CI packages the APK
+	// to prove the host sources and the Go application still produce a signed,
+	// aligned package, and there is no device on a GitHub runner — without this
+	// the only entry point to the build was a tool that refuses before it
+	// starts, which is why a shell script survived next to it.
+	fs.BoolVar(&o.buildOnly, "build-only", false, "package the APK and stop: no device, "+
+		"no install, no transcript")
 	// ⭐ THE FRAMES COME BACK, AND WHERE THEY LAND IS NOT A PREFERENCE. A frame
 	// from a headset's camera is a picture of a room and whoever is in it. The
 	// choice of directory belongs to go-appdirs/outdir, which already owns this
@@ -152,6 +162,15 @@ func run(ctx context.Context, argv []string) error {
 	fs.BoolVar(&o.pull, "pull", false, "bring back any PNG frames the probe wrote")
 	if err := fs.Parse(argv); err != nil {
 		return err
+	}
+
+	// -build-only stops before everything that needs a phone: the transcript
+	// table, the device, the unlock, the install. It is the whole of what CI
+	// can check, and it is checked there — see xrpack.Verify, which refuses an
+	// APK whose payload is compressed.
+	if o.buildOnly {
+		// xrpack prints the APK's path itself, so there is nothing to add.
+		return build(ctx, o)
 	}
 
 	name := filepath.Base(o.app)
@@ -191,7 +210,7 @@ func run(ctx context.Context, argv []string) error {
 	}
 	if o.install {
 		fmt.Println("==> installing")
-		if _, err := adb(ctx, o.device, "install", "-r", "host/out/xrhost.apk"); err != nil {
+		if _, err := adb(ctx, o.device, "install", "-r", apkPath); err != nil {
 			return err
 		}
 	}
@@ -631,28 +650,35 @@ func soleDevice(ctx context.Context) (string, error) {
 		"entry, which survives an address change", len(found), strings.Join(found, ", "))
 }
 
-// build runs host/build.sh, which is the SDK's own tool chain and stays a
-// script: it is aapt2, javac, d8, zipalign and apksigner in a row, with no
-// decisions in it.
+// build packages the APK.
+//
+// ⛔ IT USED TO RUN host/build.sh, AND THE COMMENT HERE SAID THAT SCRIPT HAD
+// "no decisions in it". It had six — which platform, which build-tools, build
+// or copy, resources or not, keystore or not, and what to splice into the
+// manifest — plus three kinds of text processing, and one of them was WRONG: a
+// `sed` replacement treats & as the whole match, so a label holding one came
+// out as the attribute it was replacing. tools/xrpack does the deciding and the
+// zip; javac, d8, aapt2 and apksigner still do what only they can.
 func build(ctx context.Context, o options) error {
-	env := append(os.Environ(), "APP="+o.app, "GOWORK=off")
 	// ⛔ THE MANIFEST GETS THE SAME LIST THE GRANTS DO. Declaring and granting
 	// from two different sources is how a probe ends up granted a permission
 	// its manifest never asked for, which `pm grant` rejects by name.
-	if ps := permissions(filepath.Base(o.app), o.perms); len(ps) > 0 {
-		env = append(env, "PERMISSIONS="+strings.Join(ps, " "))
+	opts := xrpack.Options{
+		Root:  ".",
+		App:   o.app,
+		Edits: xrpack.Edits{Args: o.args, Permissions: permissions(filepath.Base(o.app), o.perms)},
 	}
-	// ⛔ FIND THE TOOL CHAIN RATHER THAN DEMANDING IT. build.sh refuses without
-	// ANDROID_HOME and JAVA_HOME, and a tool that needs two exports before it
-	// will run is a tool nobody runs — the seven-step incantation this replaces
-	// was itself only ever typed with them already in the shell.
+	// ⛔ FIND THE TOOL CHAIN RATHER THAN DEMANDING IT. A tool that needs two
+	// exports before it will run is a tool nobody runs — the seven-step
+	// incantation this replaces was itself only ever typed with them already in
+	// the shell.
 	if os.Getenv("ANDROID_HOME") == "" {
 		p, err := findDir("ANDROID_HOME", "platforms", androidHomes())
 		if err != nil {
 			return err
 		}
 		fmt.Printf("==> ANDROID_HOME %s\n", p)
-		env = append(env, "ANDROID_HOME="+p)
+		opts.AndroidHome = p
 	}
 	if os.Getenv("JAVA_HOME") == "" {
 		p, err := findDir("JAVA_HOME", filepath.Join("bin", "javac"), javaHomes())
@@ -660,16 +686,19 @@ func build(ctx context.Context, o options) error {
 			return err
 		}
 		fmt.Printf("==> JAVA_HOME %s\n", p)
-		env = append(env, "JAVA_HOME="+p)
+		opts.JavaHome = p
 	}
-	cmd := exec.CommandContext(ctx, "sh", "host/build.sh")
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
+	res, err := xrpack.Pack(ctx, opts, xrpack.ExecRunner{}, os.Stdout)
 	if err != nil {
-		return fmt.Errorf("host/build.sh: %w\n%s", err, out)
+		return err
 	}
+	apkPath = res.APK
 	return nil
 }
+
+// apkPath is where the last build put the APK, so the install step points at
+// the file that was just written rather than at a path spelled twice.
+var apkPath = filepath.Join("host", "out", "xrhost.apk")
 
 func adb(ctx context.Context, device string, args ...string) ([]byte, error) {
 	full := append([]string{"-s", device}, args...)

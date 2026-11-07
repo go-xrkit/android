@@ -23,7 +23,8 @@
 // it, all resting on one ioctl nobody has tried. So this tries the ioctl, in
 // four steps, and says which one the kernel stopped at.
 //
-//	APP=./cmd/xrusb host/build.sh && adb install -r host/out/xrhost.apk
+//	go run ./tools/xrrun -build-only -app ./cmd/xrusb
+//	adb install -r host/out/xrhost.apk
 //	adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity \
 //	    --ez capture false --es args '-wait 5m'
 //	adb shell run-as org.goxrkit.androidhost cat files/usb.txt

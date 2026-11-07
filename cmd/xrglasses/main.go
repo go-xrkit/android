@@ -10,7 +10,8 @@
 // question asked interactively -- it has to be a question ASKED IN ADVANCE and
 // answered while nobody is watching.
 //
-//	APP=./cmd/xrglasses host/build.sh && adb install -r host/out/xrhost.apk
+//	go run ./tools/xrrun -build-only -app ./cmd/xrglasses
+//	adb install -r host/out/xrhost.apk
 //	adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity --ez capture false
 //	# unplug the cable, attach the glasses, wait, plug the cable back
 //	adb logcat -d -s xrcapture
