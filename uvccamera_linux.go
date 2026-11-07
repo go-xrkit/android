@@ -46,6 +46,18 @@ type UVCCamera struct {
 // nothing was there to open.
 var ErrNoCamera = errors.New("android: no UVC camera is attached")
 
+// streamOn is the last of the nine steps, as a seam.
+//
+// ⚠ IT EXISTS FOR THE TEST AND THE TEST IS THE REASON TO HAVE IT. Starting a
+// real stream spawns the reaping goroutine and submits URBs, so a test of the
+// OPEN would be a test of the stream as well — and the stream has its own
+// fixture, with its own seams for submit and reap. Replacing one function is
+// how the open gets exercised without two fixtures fighting over the same
+// ioctl.
+var streamOn = func(h *USBHandle, neg UVCNegotiation, ep USBEndpoint, w, ht int) (*UVCStream, error) {
+	return h.Stream(neg, ep, w, ht)
+}
+
 // OpenUVCCamera finds the headset's camera and starts its stream.
 //
 // logf, when not nil, is given the same stage lines cmd/xrhead printed when it
@@ -120,7 +132,7 @@ func OpenUVCCamera(ctx context.Context, o UVCCameraOptions, logf func(string, ..
 			alt.Number, alt.Alternate, err))
 	}
 
-	s, err := h.Stream(neg, ep, size.Width, size.Height)
+	s, err := streamOn(h, neg, ep, size.Width, size.Height)
 	if err != nil {
 		return fail(fmt.Errorf("android: starting the stream on %s: %w", dev.Name, err))
 	}
