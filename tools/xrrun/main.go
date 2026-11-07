@@ -119,7 +119,17 @@ func main() {
 }
 
 type options struct {
-	app      string
+	app string
+	// appBin packages a binary built elsewhere, with pkgID and label naming it.
+	//
+	// ⛔ THE SCRIPT THIS TOOL REPLACED HAD THIS AND THE PORT NEARLY LOST IT.
+	// `APP_BIN=… PACKAGE=… host/build.sh` was one command line; routing it
+	// through a Go API only would have meant writing a program to put xrdesk on
+	// a phone, which is a capability removed rather than moved.
+	appBin   string
+	pkgID    string
+	label    string
+	apkName  string
 	args     string
 	perms    string
 	device   string
@@ -138,6 +148,15 @@ func run(ctx context.Context, argv []string) error {
 	var o options
 	fs := flag.NewFlagSet("xrrun", flag.ContinueOnError)
 	fs.StringVar(&o.app, "app", "./cmd/xrusb", "the probe to package and run")
+	// An application from ANOTHER module: the host does not care which Go
+	// program it spawns, so any CGO-free android/arm64 binary is a valid
+	// payload. Building it is that module's business.
+	fs.StringVar(&o.appBin, "app-bin", "", "a pre-built android/arm64 binary to package "+
+		"instead of building -app; use with -package so it can be installed beside the demo")
+	fs.StringVar(&o.pkgID, "package", "", "the application id to put in the manifest "+
+		"(default org.goxrkit.androidhost)")
+	fs.StringVar(&o.label, "label", "", "the launcher label (default go-xrkit)")
+	fs.StringVar(&o.apkName, "apk", "", "the APK's base name under host/out (default xrhost)")
 	fs.StringVar(&o.args, "args", "", "arguments for the probe, as one string")
 	fs.StringVar(&o.perms, "perms", "", "space-separated permissions the APK should declare")
 	fs.StringVar(&o.device, "device", "", "adb device, or empty for the only one")
@@ -162,6 +181,18 @@ func run(ctx context.Context, argv []string) error {
 	fs.BoolVar(&o.pull, "pull", false, "bring back any PNG frames the probe wrote")
 	if err := fs.Parse(argv); err != nil {
 		return err
+	}
+
+	// ⛔ A PACKAGE ID THIS TOOL CANNOT ACT ON IS A REFUSAL, NOT A WARNING.
+	// Everything after the build — install, `pm grant`, `am start`, `run-as` —
+	// names org.goxrkit.androidhost, so a renamed APK would be installed and
+	// then watched at the wrong address: the transcript never appears and that
+	// reads as a probe that said nothing.
+	if (o.pkgID != "" || o.appBin != "") && !o.buildOnly {
+		return fmt.Errorf("-package and -app-bin are for -build-only: this tool installs, " +
+			"grants and starts org.goxrkit.androidhost by name, and would watch the wrong " +
+			"package for a transcript that never arrives. Package with -build-only, then " +
+			"install and start it yourself")
 	}
 
 	// -build-only stops before everything that needs a phone: the transcript
@@ -663,10 +694,26 @@ func build(ctx context.Context, o options) error {
 	// ⛔ THE MANIFEST GETS THE SAME LIST THE GRANTS DO. Declaring and granting
 	// from two different sources is how a probe ends up granted a permission
 	// its manifest never asked for, which `pm grant` rejects by name.
+	// ⚠ -app-bin SILENCES -app, including its default. Building a probe nobody
+	// asked for while packaging somebody else's binary would waste forty
+	// seconds — and the probe's name is what the permission table is keyed on,
+	// so leaving it in place would declare CAMERA for a foreign application
+	// because xrusb happens to be the default.
+	probe := filepath.Base(o.app)
+	if o.appBin != "" {
+		o.app, probe = "", ""
+	}
 	opts := xrpack.Options{
-		Root:  ".",
-		App:   o.app,
-		Edits: xrpack.Edits{Args: o.args, Permissions: permissions(filepath.Base(o.app), o.perms)},
+		Root:    ".",
+		App:     o.app,
+		AppBin:  o.appBin,
+		APKName: o.apkName,
+		Edits: xrpack.Edits{
+			Package:     o.pkgID,
+			Label:       o.label,
+			Args:        o.args,
+			Permissions: permissions(probe, o.perms),
+		},
 	}
 	// ⛔ FIND THE TOOL CHAIN RATHER THAN DEMANDING IT. A tool that needs two
 	// exports before it will run is a tool nobody runs — the seven-step
