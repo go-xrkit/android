@@ -1059,21 +1059,71 @@ func TestAStreamReportsWhatTheKernelRefuses(t *testing.T) {
 		}
 	})
 
+	// ⛔⛔ THIS SUBTEST WAS A 1-IN-500 FLAKE, AND THE RACE WAS IN ITS OWN
+	// FIXTURE. It used to call failTheNextSubmit() AFTER Stream returned, which
+	// arms the failure at "whatever the submit count is now + 1". The reader
+	// runs on its own goroutine, so by then it could already have reaped
+	// everything this fake had queued — and from that point every reap answers
+	// EAGAIN, no submit is ever attempted, and the ENODEV the test is waiting
+	// for is never triggered at all. Frame then blocks until the context's
+	// deadline.
+	//
+	// ⚠ MEASURED, BOTH WAYS. One failure in 500 runs on real s390x hardware
+	// (no qemu) with the old arming, and one occurrence in CI's
+	// ppc64le-under-qemu lane twenty minutes after the same job was green.
+	// Loosening the assertion to "retry until the error arrives" made it WORSE,
+	// not better: 11 failures in 2000, now as `context deadline exceeded`,
+	// because a retry cannot wait for an error that nothing will produce.
+	//
+	// ⭐ SO THE TRIGGER IS FIXED BEFORE THE READER STARTS. The initial fill
+	// submits exactly StreamURBs requests, so request StreamURBs+1 is the first
+	// RESUBMIT, and arming the fake at that number cannot depend on who runs
+	// first. The loop below still tolerates one frame arriving before the
+	// error, because that ordering is legitimate — a frame assembled before the
+	// device went away is real pixels — and this test must not pin down a
+	// choice about dropping it.
 	t.Run("a resubmit that fails after a frame arrived", func(t *testing.T) {
 		const w, h = 320, 2
 		whole := w * h * BytesPerPixelYUY2
-		f := &fakeStream{t: t, packet: 3072}
+		f := &fakeStream{t: t, packet: 3072, submitErrAfter: StreamURBs + 1}
 		f.install()
 		f.sendFrame(false, 0x7, whole, 1024)
 		f.sendFrame(true, 0x8, 1024, 1024)
 		s, err := fakeHandle().Stream(UVCNegotiation{Kind: FormatYUY2}, isoEndpoint(3072), w, h)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("Stream = %v: the failure is armed at the first RESUBMIT, so the "+
+				"initial fill must still succeed", err)
 		}
 		defer s.Close()
-		f.failTheNextSubmit()
-		if _, err := s.Frame(streamCtx(t)); !errors.Is(err, syscall.ENODEV) {
-			t.Fatalf("Frame = %v, want the kernel's ENODEV from the resubmit", err)
+
+		// At most one WHOLE frame can have been assembled from what was queued:
+		// the first sendFrame carries a complete one and the second a partial.
+		// A second would be a defect in the fake rather than in the stream.
+		var frames int
+		for {
+			frame, err := s.Frame(streamCtx(t))
+			if errors.Is(err, syscall.ENODEV) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("Frame = %v, want the kernel's ENODEV from the resubmit", err)
+			}
+			frames++
+			if frames > 1 {
+				t.Fatalf("%d frames arrived before the refused resubmit was reported; only "+
+					"one whole frame was queued, so the error is not being reported at all",
+					frames)
+			}
+			// ⛔ A frame delivered before the failure must still be a WHOLE one.
+			// Reporting the error after handing out a short frame would be the
+			// silent corruption this suite exists to catch. It is checked on the
+			// DECODED image's bounds — Frame answers an *image.RGBA, whose Pix
+			// is four bytes a pixel, so comparing it with the YUY2 byte count
+			// would be comparing two different quantities.
+			if b := frame.Bounds(); b.Dx() != w || b.Dy() != h {
+				t.Fatalf("the frame that arrived before the failure is %dx%d, want %dx%d",
+					b.Dx(), b.Dy(), w, h)
+			}
 		}
 	})
 
