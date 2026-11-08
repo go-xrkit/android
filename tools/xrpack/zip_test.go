@@ -18,7 +18,10 @@ import (
 // fakeBase writes something shaped like what aapt2 link produces: a stored
 // resources.arsc, a stored binary manifest and a compressed resource, with an
 // odd-length name so the data offsets are not accidentally aligned.
-func fakeBase(t *testing.T, path string) {
+// It takes a testing.TB rather than a *testing.T so the benchmarks can ask for
+// the same archive the tests judge: a benchmark built on a different fixture
+// would be measuring something else.
+func fakeBase(t testing.TB, path string) {
 	t.Helper()
 	f, err := os.Create(path)
 	if err != nil {
