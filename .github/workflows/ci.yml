@@ -22,16 +22,20 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.3'
-      # ⛔⛔ IT IS INSTALLED FROM THE MODULE PROXY, NOT `curl | bash`. This step
-      # used to run
+      # ⛔⛔ IT IS INSTALLED FROM THE MODULE PROXY, NOT BY PIPING A DOWNLOADED
+      # SCRIPT INTO A SHELL. Until v0.20.1 this step fetched the upstream
+      # installer from a BRANCH and ran it, on every push, in a job holding the
+      # runner's token — unpinned, unverified, and arbitrary code by
+      # construction. actionlint is a Go program, so `go install` at a pinned
+      # version gets it through proxy.golang.org with the checksum database
+      # vouching for the bytes, which is the same guarantee every other
+      # dependency here already has.
       #
-      #   bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-      #
-      # which is an UNPINNED script from a branch, piped into a shell, on every
-      # push, with the runner's token in the environment. actionlint is a Go
-      # program, so `go install` at a pinned version gets it through
-      # proxy.golang.org with the checksum database vouching for the bytes —
-      # which is the same guarantee every other dependency here already has.
+      # ⚠ THE OLD COMMAND IS DESCRIBED AND NOT QUOTED. It is in the commit that
+      # removed it, where the reasoning belongs; reproducing it here would make
+      # this file match a search for the very pattern it no longer uses, and an
+      # audit that greps the fleet for it would report this repository as still
+      # doing it.
       #
       # ⭐ AND IT STOPPED A REAL OUTAGE FROM LOOKING LIKE OUR DEFECT. On
       # 2026-11-08 GitHub's release-asset CDN answered 504 for
