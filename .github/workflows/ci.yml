@@ -102,6 +102,26 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: go test -race -timeout 300s ./...
+      # ⛔⛔ EVERY PARSER HERE READS BYTES A DEVICE CHOSE: the USB descriptor
+      # blob, the isochronous payload header, the MJPEG frame -- and the zip the
+      # packager reads back from aapt2. None of them had a fuzz target until
+      # 2026-11-08, and the first real run of the last one found a defect in
+      # twenty seconds: Repack advanced its offset by the size the central
+      # directory CLAIMED, so a damaged archive produced a misaligned payload
+      # and a cheerful "succeeded".
+      #
+      # ⚠ TWENTY SECONDS EACH IS A SMOKE TEST AND NOT A CAMPAIGN. It re-runs the
+      # committed seeds and the crashers under testdata/fuzz every time, which
+      # is the regression half, and explores a little. A long campaign belongs
+      # on a workstation, said out loud, with its findings committed as seeds.
+      - name: Fuzz the parsers that read device bytes
+        run: |
+          for target in FuzzParsePayload FuzzUSBDescriptors FuzzFrameAssemblerFeed; do
+            CGO_ENABLED=0 go test -run '^$' -fuzz "$target" -fuzztime 20s .
+          done
+          for target in FuzzStripAlignExtra FuzzRepackReadsWhateverIsOnDisk; do
+            CGO_ENABLED=0 go test -run '^$' -fuzz "$target" -fuzztime 20s ./tools/xrpack/
+          done
       - name: 100% coverage gate
         env:
           CGO_ENABLED: "1"

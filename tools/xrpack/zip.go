@@ -186,10 +186,33 @@ func (a *aligningWriter) write(h *zip.FileHeader, data io.Reader, n int64) error
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(w, data); err != nil {
+	// ⛔⛔ THE OFFSET ADVANCES BY WHAT WAS WRITTEN, NOT BY WHAT THE ARCHIVE
+	// CLAIMED. A copied entry's size comes from the central directory, which is
+	// a number in a file on disk: when it overstates the data, io.Copy writes
+	// less, every later padding is computed from a position the file never
+	// reached, and the payload lands off its page boundary.
+	//
+	// ⭐ FOUND BY FuzzRepackReadsWhateverIsOnDisk, in six seconds, on a 292-byte
+	// archive built from a valid one by changing two lengths:
+	//
+	//	Repack succeeded on a 292-byte base and wrote an APK Verify refuses:
+	//	lib/arm64-v8a/libxrapp.so starts at 8096, which is not a multiple of
+	//	16384
+	//
+	// Pack would have caught that at its own Verify step, loudly. Repack is
+	// exported and the invariant is its own, and "succeeded" about an APK whose
+	// library cannot be mapped is the wrong answer however loudly the next step
+	// shouts.
+	written, err := io.Copy(w, data)
+	if err != nil {
 		return err
 	}
-	a.off += hdr + n
+	if written != n {
+		return fmt.Errorf("%s declares %d compressed byte(s) and only %d could be read: "+
+			"the archive aapt2 wrote is damaged or truncated, so nothing is packaged "+
+			"rather than an APK built from half an entry", h.Name, n, written)
+	}
+	a.off += hdr + written
 	return nil
 }
 
