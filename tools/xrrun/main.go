@@ -142,6 +142,9 @@ type options struct {
 	buildOnly bool
 	install   bool
 	pull      bool
+	// artifacts pulls named files off the device and stops. It replaces
+	// host/pull-artifacts.sh; see pullArtifacts.
+	artifacts bool
 }
 
 func run(ctx context.Context, argv []string) error {
@@ -179,6 +182,8 @@ func run(ctx context.Context, argv []string) error {
 	// the path resolved first — a capture directory reached through a symbolic
 	// link found no .git in an earlier copy of this rule and was accepted.
 	fs.BoolVar(&o.pull, "pull", false, "bring back any PNG frames the probe wrote")
+	fs.BoolVar(&o.artifacts, "artifacts", false, "pull the named files out of the "+
+		"application's external files directory and stop: no build, no install, no probe")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -202,6 +207,25 @@ func run(ctx context.Context, argv []string) error {
 	if o.buildOnly {
 		// xrpack prints the APK's path itself, so there is nothing to add.
 		return build(ctx, o)
+	}
+
+	// -artifacts needs a device and nothing else: no build, no install, no
+	// probe, and no unlocked screen — `adb pull` reads external storage while
+	// the phone is locked.
+	if o.artifacts {
+		if len(fs.Args()) == 0 {
+			return fmt.Errorf("-artifacts needs the name of at least one file to pull, as "+
+				"the probe wrote it: `%s -artifacts wall-sentinel.png`", fs.Name())
+		}
+		if o.device == "" {
+			d, err := soleDevice(ctx)
+			if err != nil {
+				return err
+			}
+			o.device = d
+			fmt.Printf("==> device %s\n", d)
+		}
+		return pullArtifacts(ctx, o, fs.Args())
 	}
 
 	name := filepath.Base(o.app)
@@ -301,6 +325,94 @@ func run(ctx context.Context, argv []string) error {
 		return errors.New("the probe did not finish its measurement; the transcript is above")
 	}
 	return nil
+}
+
+// pullArtifacts brings named files out of the application's external files
+// directory, to somewhere durable and outside every repository.
+//
+// It replaces host/pull-artifacts.sh, which walked the destination up to the
+// filesystem root looking for a .git and refused if it found one — and then did
+//
+//	adb pull ".../files/$f" "$dir/$f"
+//
+// ⛔⛔ SO ITS OWN GUARD COULD BE WALKED PAST BY THE ARGUMENT IT WAS GIVEN. A
+// name of `../../x.png` lands outside the directory the thirty lines above had
+// just established was safe, and `../../../../../../etc/cron.d/x.png` leaves
+// the home directory altogether. This is the same path traversal
+// [safeFrameName] documents for names that arrive from the DEVICE, one
+// directory over, in the same repository — and a name typed from a log is not
+// more trustworthy than a name read from a log.
+//
+// ⚠ TWO CHECKS, as there: the name must be a single ordinary path element, AND
+// the joined path must still be inside the chosen directory. The second does
+// not trust the first.
+func pullArtifacts(ctx context.Context, o options, names []string) error {
+	// ⭐ WHERE THEY LAND IS NOT A PREFERENCE. An artefact from this host is a
+	// picture of a screen, and a screen is a picture of whoever was at it. The
+	// choice belongs to go-appdirs/outdir, which refuses any directory under a
+	// .git — including one reached through a symbolic link, and including one a
+	// person named in XRKIT_ARTIFACT_DIR themselves, because that is the exact
+	// mistake the refusal exists for.
+	dir, err := outdir.Ensure(outdir.Spec{
+		App: "go-xrkit-android",
+		Env: "XRKIT_ARTIFACT_DIR",
+		Sub: "captures",
+	})
+	if err != nil {
+		return fmt.Errorf("choosing somewhere to put the artefacts: %w", err)
+	}
+	for _, name := range names {
+		if !safeArtifactName(name) {
+			return fmt.Errorf("%q is not a plain file name: an artefact is pulled into %s "+
+				"by name, so a name holding a path separator or `..` would write outside "+
+				"the directory chosen to keep it out of every work tree. Nothing was pulled",
+				name, dir)
+		}
+		out := filepath.Join(dir, name)
+		// The check that asks the filesystem rather than the string.
+		if !insideDir(dir, out) {
+			return fmt.Errorf("%q lands at %q, outside %s. Nothing was pulled", name, out, dir)
+		}
+		if _, err := adb(ctx, o.device, "pull",
+			"/storage/emulated/0/Android/data/"+pkg+"/files/"+name, out); err != nil {
+			return fmt.Errorf("pulling %s: %w", name, err)
+		}
+		fmt.Println(out)
+	}
+	fmt.Printf("==> %d artefact(s) in %s\n", len(names), dir)
+	fmt.Printf("    they are pictures of a screen: they are outside every work tree, and " +
+		"deleting them when you are done is the whole of the hygiene\n")
+	return nil
+}
+
+// safeArtifactName reports whether a name may be joined to the capture
+// directory. It is stricter than [safeFrameName] because an artefact's name
+// follows no convention this tool can check — so what is allowed is spelled out
+// rather than inferred from a prefix.
+func safeArtifactName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	// A single path element, and nothing a cleaner would rewrite.
+	if name != filepath.Base(name) || strings.ContainsRune(name, '/') ||
+		strings.ContainsRune(name, filepath.Separator) {
+		return false
+	}
+	// ⚠ A LEADING DOT IS REFUSED. It is not a traversal, but a name like
+	// `.bashrc` or `.gitignore` is one nobody means to pull out of a phone, and
+	// a hidden file in a capture directory is one nobody will notice again.
+	if name[0] == '.' {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // safeFrameName reports whether a name the DEVICE supplied may be used as a

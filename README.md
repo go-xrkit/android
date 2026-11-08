@@ -418,7 +418,7 @@ adb install -r host/out/xrhost.apk
 # platform KILLS THE PROCESS for starting without the project_media app-op.
 adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDemoActivity --ez capture false
 adb logcat -s xrcapture xr-wall
-host/pull-artifacts.sh wall-sentinel.png
+go run ./tools/xrrun -artifacts wall-sentinel.png
 ```
 
 ---
@@ -1718,12 +1718,40 @@ if it finds one**. That is `captureDir(t)` in
 refusal is the point:
 
 ```console
-$ XRKIT_ARTIFACT_DIR=./testdata/artifacts host/pull-artifacts.sh …
-REFUSED: …/testdata/artifacts is inside the git work tree at …
+$ XRKIT_ARTIFACT_DIR=./testdata/artifacts go run ./tools/xrrun -artifacts …
+xrrun: choosing somewhere to put the artefacts: outdir: XRKIT_ARTIFACT_DIR
+("…/testdata/artifacts") is inside the git work tree at …
 ```
+
+That refusal comes from
+[`go-appdirs/outdir`](https://github.com/go-appdirs/outdir), which owns this
+question for the fleet, and it applies to a directory a **person** named as well
+as to the default: pointing it at a work tree is precisely the mistake the
+barrier exists for.
 
 Nor does it go to a temporary directory. The artefact exists **so that a person
 can look at it**, and `t.TempDir()` would be gone before anyone could.
+
+### ⛔⛔ And the guard was walked past by its own argument
+
+The script this replaced, `host/pull-artifacts.sh`, did that walk up to the
+filesystem root looking for a `.git` — and then, thirty lines later:
+
+```sh
+adb pull ".../files/$f" "$dir/$f"
+```
+
+So `host/pull-artifacts.sh ../../x.png` wrote **outside** the directory it had
+just proved was safe, and six `..` left the home directory altogether. The same
+traversal was already written down in this repository for names that arrive from
+the **device** — `safeFrameName`, with the escaping names measured — and a name
+typed by a person, usually copied out of a log, is not more trustworthy for
+having been read by one.
+
+`xrrun -artifacts` applies both checks: the name must be a single ordinary path
+element from a **closed** character set, and the joined path must still be inside
+the chosen directory. One is a rule about strings, the other a question about the
+filesystem, and the second does not trust the first.
 
 ## ⛔ When the workstation cannot reach the phone, suspect the WORKSTATION
 
@@ -2170,7 +2198,7 @@ adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDisplayProbe
 #    … and while it prints "Q4 READY", inject taps on the PHONE's touchscreen:
 adb shell input tap 540 1200
 adb logcat -s xr-probe
-host/pull-artifacts.sh presentation-own-virtual-display.png
+go run ./tools/xrrun -artifacts presentation-own-virtual-display.png
 
 # 6. the ceiling. WARNING: this one KILLS system_server and reboots the device.
 adb shell am start -n org.goxrkit.androidhost/org.goxrkit.android.XrDisplayProbeActivity \
