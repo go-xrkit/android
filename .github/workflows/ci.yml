@@ -19,10 +19,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.3'
+      # ⛔⛔ IT IS INSTALLED FROM THE MODULE PROXY, NOT `curl | bash`. This step
+      # used to run
+      #
+      #   bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+      #
+      # which is an UNPINNED script from a branch, piped into a shell, on every
+      # push, with the runner's token in the environment. actionlint is a Go
+      # program, so `go install` at a pinned version gets it through
+      # proxy.golang.org with the checksum database vouching for the bytes —
+      # which is the same guarantee every other dependency here already has.
+      #
+      # ⭐ AND IT STOPPED A REAL OUTAGE FROM LOOKING LIKE OUR DEFECT. On
+      # 2026-11-08 GitHub's release-asset CDN answered 504 for
+      # releases/download of two unrelated repositories (actionlint's tarball
+      # and Hugo's), while api.github.com answered 200. The downloader did not
+      # check, so the error page went into `tar`, which reported
+      #
+      #   tar: Error is not recoverable: exiting now
+      #
+      # three steps away from the cause. The module proxy is a different
+      # service and was unaffected.
       - name: Lint the workflows
         run: |
-          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-          ./actionlint -color
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint" -color
 
   # Build, vet and test the module CGO-free on Linux, then enforce a 100%
   # statement-coverage gate.
