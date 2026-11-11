@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       # ⛔⛔ IT IS INSTALLED FROM THE MODULE PROXY, NOT BY PIPING A DOWNLOADED
       # SCRIPT INTO A SHELL. Until v0.20.1 this step fetched the upstream
       # installer from a BRANCH and ran it, on every push, in a job holding the
@@ -78,7 +78,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       - run: go version
       - run: CGO_ENABLED=0 go vet ./...
       - run: CGO_ENABLED=0 go build ./...
@@ -145,7 +145,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       - run: go version
       - run: CGO_ENABLED=0 go vet ./...
       - run: CGO_ENABLED=0 go build ./...
@@ -180,7 +180,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       - run: go version
       - run: go vet ./...
       - run: go build ./...
@@ -194,7 +194,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       - run: go version
       # -build-only packages and stops: no device, no install, no transcript.
       # The packager refuses an APK whose payload is compressed or misaligned,
@@ -243,7 +243,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       - run: go version
       - name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
         run: CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build ./...
@@ -261,7 +261,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       - run: go version
       - name: arm64 links CGO-free
         run: CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -o /dev/null ./cmd/xrcapture
@@ -290,7 +290,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       - run: go version
       - run: go env GOARCH && CGO_ENABLED=0 go test ./...
 
@@ -309,7 +309,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       - run: go version
       # ⛔ `qemu-user-static` is a VIRTUAL package on Ubuntu 26.04, which
       # `ubuntu-latest` became on 2026-10-19, and apt refuses to choose between its
