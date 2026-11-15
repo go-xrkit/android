@@ -1,6 +1,6 @@
 github.com/go-appdirs/outdir v0.3.0 h1:oqVLh83JrPdfh+FEUYmDwevp3oV1xC1qV2LxTmZn5L4=
 github.com/go-appdirs/outdir v0.3.0/go.mod h1:NXh7y7uVjrhGjUmoWb+JuQITVCs7Bj+PrRn/aNCBkb4=
-github.com/go-xrkit/xrkit v0.21.0 h1:sEa+WxuEIlb6gLfxrazRrqEtU/E19T3FAbPFip/BJK0=
-github.com/go-xrkit/xrkit v0.21.0/go.mod h1:7l4G/Z4poDHMuGjRBa32KVV+Yicv2pzzhQm+xW8bWnM=
+github.com/go-xrkit/xrkit v0.21.1 h1:x0FZLTxTjTYNc8Lc2QJ5OsAZkjCVKCCvKvzbfY/cd8U=
+github.com/go-xrkit/xrkit v0.21.1/go.mod h1:7l4G/Z4poDHMuGjRBa32KVV+Yicv2pzzhQm+xW8bWnM=
 golang.org/x/sys v0.50.0 h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs=
 golang.org/x/sys v0.50.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
